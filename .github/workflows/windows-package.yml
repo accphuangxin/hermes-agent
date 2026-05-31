@@ -1,0 +1,155 @@
+name: Windows Package
+
+# Builds self-contained Windows installer (.exe) and portable .zip.
+# Runs on CalVer tag pushes (same trigger as upload_to_pypi.yml) and
+# workflow_dispatch for manual re-runs or hotfixes.
+on:
+  push:
+    tags:
+      - 'v20*'   # CalVer: v2026.5.15, v2026.5.15.2, etc.
+  workflow_dispatch:
+    inputs:
+      confirm_tag:
+        description: 'Tag / ref to build from (e.g. v2026.5.15). Defaults to HEAD.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: false   # never cancel; every tag deserves a build
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.confirm_tag || github.ref }}
+          fetch-tags: true
+          submodules: recursive
+
+      - name: Validate tag exists (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm_tag != ''
+        shell: bash
+        run: |
+          if ! git tag -l "${{ inputs.confirm_tag }}" | grep -q .; then
+            echo "::error::Tag '${{ inputs.confirm_tag }}' does not exist in the repo"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+
+      - name: Build web dashboard
+        shell: bash
+        run: cd web && npm ci && npm run build
+
+      - name: Build TUI bundle
+        shell: bash
+        run: cd ui-tui && npm ci && npm run build
+
+      - name: Bundle TUI into hermes_cli
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path hermes_cli\tui_dist | Out-Null
+          Copy-Item ui-tui\dist\entry.js hermes_cli\tui_dist\entry.js
+
+      - name: Verify frontend assets
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "hermes_cli\web_dist\index.html")) {
+            Write-Error "ERROR: web_dist not built"; exit 1
+          }
+          if (-not (Test-Path "hermes_cli\tui_dist\entry.js")) {
+            Write-Error "ERROR: tui_dist not built"; exit 1
+          }
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_1/innosetup-6.7.1.exe"
+          $dest = "$env:TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+          Start-Process -FilePath $dest -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+          # Verify
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { Write-Error "ISCC.exe not found after install"; exit 1 }
+          echo "Inno Setup installed at $iscc"
+
+      - name: Build installer and portable zip
+        shell: pwsh
+        run: |
+          .\packaging\windows\build-installer.ps1
+        # Produces:
+        #   dist\hermes-agent-<ver>-windows-x64-portable.zip
+        #   dist\hermes-agent-<ver>-windows-x64-setup.exe
+
+      - name: List dist artifacts
+        shell: pwsh
+        run: Get-ChildItem dist\ | Select-Object Name, @{n='Size(MB)';e={'{0:N1}' -f ($_.Length/1MB)}}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-packages
+          path: |
+            dist/*-windows-*-setup.exe
+          retention-days: 30
+          if-no-files-found: error
+
+  attach-to-release:
+    name: Attach to GitHub Release
+    needs: build
+    # Only run for tag pushes — workflow_dispatch may not have a matching release.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # attach assets to the existing release
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: windows-packages
+          path: dist/
+
+      - name: Wait for GitHub Release to exist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # release.py creates the GitHub Release after pushing the tag;
+        # this workflow races against it — poll up to 5 minutes.
+        run: |
+          for i in $(seq 1 30); do
+            if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release $GITHUB_REF_NAME found"
+              exit 0
+            fi
+            echo "Waiting for release... ($i/30)"
+            sleep 10
+          done
+          echo "::warning::Release $GITHUB_REF_NAME not found after 5 minutes — skipping asset upload"
+          echo "skip_upload=true" >> "$GITHUB_ENV"
+
+      - name: Upload Windows packages to release
+        if: env.skip_upload != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/*-windows-*-setup.exe \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

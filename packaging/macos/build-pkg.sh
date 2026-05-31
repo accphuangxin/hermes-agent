@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 # packaging/macos/build-pkg.sh
-# Builds a self-contained macOS .pkg installer for hermes-agent (arm64).
+# Builds a self-contained macOS .pkg installer for hermes-agent.
+# Auto-detects the build machine architecture (arm64 or x86_64).
 #
-# Requirements (on the build machine):
-#   - macOS (any recent version, arm64 or x86_64 with Rosetta)
-#   - Xcode Command Line Tools (pkgbuild, productbuild, lsbom)
-#   - uv  (https://docs.astral.sh/uv/)
-#   - curl, tar, shasum
+# Requirements:
+#   - macOS, Xcode Command Line Tools (pkgbuild, productbuild), uv, curl, tar, shasum
 #
-# Output: dist/hermes-agent-<version>-arm64.pkg
+# Output: dist/hermes-agent-<version>-macos-<arch>.pkg
 #
 # Signing (optional):
-#   Set DEVELOPER_ID_INSTALLER to your "Developer ID Installer: ..." cert name
-#   and the pkg will be signed with --sign.  Without it the pkg is unsigned
-#   (fine for local / CI distribution; Gatekeeper will warn on first run).
+#   Set DEVELOPER_ID_INSTALLER to your "Developer ID Installer: ..." cert name.
 #
 # Usage:
 #   ./packaging/macos/build-pkg.sh
@@ -25,27 +21,38 @@ cd "$(dirname "$0")/../.."   # repo root
 
 # ── Config ────────────────────────────────────────────────────────────────────
 VERSION=$(grep '^version = ' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-ARCH="arm64"
-INSTALL_PREFIX="/usr/local/hermes"   # final install root inside the pkg
+
+# Auto-detect architecture
+HOST_ARCH="$(uname -m)"   # arm64 or x86_64
+if [[ "${HOST_ARCH}" == "arm64" ]]; then
+    ARCH="arm64"
+    PBS_PBS_TRIPLE="aarch64-apple-darwin"
+    PBS_SHA256="03bcedae9b19a48888d7dc8ba064f73f6efaaf2b13f6a8e1a1bcc062df13e855"
+elif [[ "${HOST_ARCH}" == "x86_64" ]]; then
+    ARCH="x86_64"
+    PBS_PBS_TRIPLE="x86_64-apple-darwin"
+    PBS_SHA256="5e388e3db8b59c8487ddd1423330b90fc7f0c6ef7eadec945441a180d0dd4bc4"
+else
+    echo "error: unsupported architecture: ${HOST_ARCH}" >&2
+    exit 1
+fi
+
+INSTALL_PREFIX="/usr/local/hermes"
 BIN_DIR="/usr/local/bin"
 
 # python-build-standalone release to embed.
-# Browse releases at: https://github.com/astral-sh/python-build-standalone/releases
 PBS_VERSION="20260510"
 PBS_PYTHON_VERSION="3.11.15"
-PBS_TARBALL="cpython-${PBS_PYTHON_VERSION}+${PBS_VERSION}-aarch64-apple-darwin-install_only.tar.gz"
+PBS_TARBALL="cpython-${PBS_PYTHON_VERSION}+${PBS_VERSION}-${PBS_PBS_TRIPLE}-install_only.tar.gz"
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}/${PBS_TARBALL}"
-# SHA-256 of the above tarball — verify at:
-# https://github.com/astral-sh/python-build-standalone/releases/download/20260510/SHA256SUMS
-PBS_SHA256="03bcedae9b19a48888d7dc8ba064f73f6efaaf2b13f6a8e1a1bcc062df13e855"
 
 BUILD_DIR="$(pwd)/build/macos-pkg"
 PAYLOAD_DIR="${BUILD_DIR}/payload"
-PKG_COMPONENT="${BUILD_DIR}/hermes-agent-${VERSION}-${ARCH}.pkg"
+PKG_COMPONENT="${BUILD_DIR}/hermes-agent-${VERSION}-macos-${ARCH}.pkg"
 DIST_DIR="$(pwd)/dist"
-OUTPUT_PKG="${DIST_DIR}/hermes-agent-${VERSION}-${ARCH}.pkg"
+OUTPUT_PKG="${DIST_DIR}/hermes-agent-${VERSION}-macos-${ARCH}.pkg"
 
-echo "==> Building hermes-agent ${VERSION} pkg (${ARCH})"
+echo "==> Building hermes-agent ${VERSION} pkg (macos-${ARCH})"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
 if ! command -v pkgbuild &>/dev/null; then
