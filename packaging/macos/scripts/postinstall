@@ -1,0 +1,94 @@
+#!/bin/bash
+# packaging/macos/scripts/postinstall
+# Runs after the payload is extracted to /usr/local/hermes.
+#
+# The venv was built on the build machine with the payload root as the
+# prefix, so every shebang line and pyvenv.cfg still points to the
+# build machine's temporary path:
+#   /path/to/build/macos-pkg/payload/usr/local/hermes/venv/...
+#
+# This script replaces every occurrence of that build-time prefix with
+# the real install path (/usr/local/hermes), making the venv fully
+# relocatable without any re-download or re-install.
+set -euo pipefail
+
+INSTALL_DIR="/usr/local/hermes"
+VENV_DIR="${INSTALL_DIR}/venv"
+BIN_DIR="/usr/local/bin"
+
+# ── Detect the build-machine prefix embedded in the venv ──────────────────────
+# pyvenv.cfg always contains the absolute path used at venv-creation time.
+PYVENV_CFG="${VENV_DIR}/pyvenv.cfg"
+if [[ ! -f "${PYVENV_CFG}" ]]; then
+    echo "error: ${PYVENV_CFG} not found — venv missing from payload?" >&2
+    exit 1
+fi
+
+# Extract the home path (the directory that contains the Python binary used
+# to create the venv). Strip the trailing /bin to get the root prefix.
+BUILD_PYTHON_HOME=$(grep '^home = ' "${PYVENV_CFG}" | sed 's/^home = //')
+# BUILD_PYTHON_HOME is e.g. /…/payload/usr/local/hermes/bin
+# Strip everything up to and including the payload root to get what needs
+# replacing: /…/build/macos-pkg/payload/usr/local/hermes
+BUILD_PREFIX="${BUILD_PYTHON_HOME%/bin}"
+
+if [[ -z "${BUILD_PREFIX}" || "${BUILD_PREFIX}" == "${INSTALL_DIR}" ]]; then
+    # Paths already correct (e.g. built directly in /usr/local/hermes) —
+    # nothing to rewrite.
+    echo "==> Venv paths already point to ${INSTALL_DIR}, no rewrite needed."
+else
+    echo "==> Rewriting venv paths"
+    echo "    from: ${BUILD_PREFIX}"
+    echo "    to:   ${INSTALL_DIR}"
+
+    # 1. Rewrite all text-mode scripts in venv/bin (shebang lines).
+    #    Use LC_ALL=C so grep/sed treat bytes literally (safe for binary-mixed files).
+    while IFS= read -r -d '' script; do
+        # Skip non-text files (compiled extensions, .pyc, etc.)
+        if file "${script}" 2>/dev/null | grep -q "text"; then
+            LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${script}" 2>/dev/null || true
+        fi
+    done < <(find "${VENV_DIR}/bin" -maxdepth 1 -type f -print0)
+
+    # 2. Rewrite pyvenv.cfg (home =, base-prefix, base-exec-prefix lines).
+    LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${PYVENV_CFG}"
+
+    # 3. Rewrite any __editable__*.pth or direct_url.json that contain the
+    #    build prefix (only present when installed with pip install -e or
+    #    when pip writes dist-info with absolute paths).
+    SITE_PACKAGES=$(find "${VENV_DIR}/lib" -maxdepth 2 -name "site-packages" -type d | head -1)
+    if [[ -n "${SITE_PACKAGES}" ]]; then
+        find "${SITE_PACKAGES}" \
+            \( -name "*.pth" -o -name "direct_url.json" -o -name "RECORD" \) \
+            -print0 | while IFS= read -r -d '' f; do
+            LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${f}" 2>/dev/null || true
+        done
+    fi
+fi
+
+# ── Ensure /usr/local/bin exists and permissions are correct ──────────────────
+if [[ ! -d "${BIN_DIR}" ]]; then
+    mkdir -p "${BIN_DIR}"
+fi
+
+chmod -R a+rX "${INSTALL_DIR}"
+chmod 755 "${BIN_DIR}/hermes" "${BIN_DIR}/hermes-agent" "${BIN_DIR}/hermes-acp" 2>/dev/null || true
+
+echo ""
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║         hermes-agent installation complete            ║"
+echo "╠══════════════════════════════════════════════════════╣"
+echo "║                                                        ║"
+echo "║  Run: hermes                                           ║"
+echo "║                                                        ║"
+echo "║  If 'hermes' is not found, add /usr/local/bin to PATH:║"
+echo "║    echo 'export PATH=\"/usr/local/bin:$PATH\"' >>       ║"
+echo "║          ~/.zprofile && source ~/.zprofile             ║"
+echo "║                                                        ║"
+echo "║  To uninstall:                                         ║"
+echo "║    sudo rm -rf /usr/local/hermes                       ║"
+echo "║    sudo rm /usr/local/bin/hermes{,-agent,-acp}         ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
+
+exit 0

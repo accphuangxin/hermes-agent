@@ -3772,6 +3772,41 @@ def _all_platforms() -> list[dict]:
             "install_hint": entry.install_hint,
             "_registry_entry": entry,
         })
+
+    # Inject already-configured weixin_N slots so they appear in the menu.
+    # This lets users reconfigure or remove existing extra accounts.
+    _weixin_slots_in_list = {p["key"] for p in platforms if p["key"].startswith("weixin_")}
+    _has_primary_weixin = get_env_value("WEIXIN_ACCOUNT_ID") or get_env_value("WEIXIN_TOKEN")
+    try:
+        import re as _re
+        from hermes_cli.config import load_config_readonly as _lcr
+        _cfg = _lcr()
+        _gw_platforms = (_cfg.get("gateway") or {}).get("platforms") or {}
+        if not _gw_platforms:
+            _gw_platforms = _cfg.get("platforms") or {}
+        for _slot in sorted(_gw_platforms.keys()):
+            if _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", _slot) and _slot not in _weixin_slots_in_list:
+                _n = _slot.split("_", 1)[1]
+                platforms.append({
+                    "key": _slot,
+                    "label": f"Weixin / WeChat (account {_n})",
+                    "emoji": "💬",
+                    "token_var": f"WEIXIN_{_n}_ACCOUNT_ID",
+                    "_weixin_slot": True,
+                })
+    except Exception:
+        pass
+
+    # Always show an "add account" entry when at least one WeChat is configured.
+    if _has_primary_weixin:
+        platforms.append({
+            "key": "_weixin_add",
+            "label": "Weixin / WeChat — add another account",
+            "emoji": "➕",
+            "token_var": "",
+            "_weixin_add": True,
+        })
+
     return platforms
 
 
@@ -3781,6 +3816,8 @@ def _platform_status(platform: dict) -> str:
     Returns uncolored text so it can safely be embedded in
     curses menu items (ANSI codes break width calculation).
     """
+    if platform.get("_weixin_add"):
+        return "click to add"
     entry = platform.get("_registry_entry")
     if entry is not None:
         configured = False
@@ -3847,6 +3884,28 @@ def _platform_status(platform: dict) -> str:
         if val and token:
             return "configured"
         if val or token:
+            return "partially configured"
+        return "not configured"
+    import re as _re
+    if _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", platform.get("key", "")):
+        # Slot accounts are configured entirely in config.yaml platforms block;
+        # check both the YAML-derived token_var and the in-config account_id.
+        _n = platform["key"].split("_", 1)[1]
+        _acct = get_env_value(f"WEIXIN_{_n}_ACCOUNT_ID")
+        _tok = get_env_value(f"WEIXIN_{_n}_TOKEN")
+        if not _acct and not _tok:
+            # fall back to config.yaml check
+            try:
+                from hermes_cli.config import load_config_readonly as _lcr
+                _gw = (_lcr().get("gateway") or {}).get("platforms") or _lcr().get("platforms") or {}
+                _slot_cfg = _gw.get(platform["key"]) or {}
+                _acct = _slot_cfg.get("extra", {}).get("account_id")
+                _tok = _slot_cfg.get("token")
+            except Exception:
+                pass
+        if _acct and _tok:
+            return "configured"
+        if _acct or _tok:
             return "partially configured"
         return "not configured"
     if val:
@@ -4358,6 +4417,202 @@ def _setup_weixin():
     if user_id:
         print_info(f"  User ID: {user_id}")
 
+    # Offer to add a second account
+    print()
+    if prompt_yes_no("  Add another WeChat account (multi-account)?", False):
+        _setup_weixin_slot_interactive()
+
+
+def _next_weixin_slot() -> str:
+    """Return the next available weixin_N slot name (weixin_2, weixin_3, …)."""
+    import re as _re
+    try:
+        from hermes_cli.config import load_config_readonly as _lcr
+        _cfg = _lcr()
+        _gw = (_cfg.get("gateway") or {}).get("platforms") or _cfg.get("platforms") or {}
+        existing = {k for k in _gw if _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", k)}
+    except Exception:
+        existing = set()
+    n = 2
+    while f"weixin_{n}" in existing:
+        n += 1
+    return f"weixin_{n}"
+
+
+def _setup_weixin_slot_interactive(slot: str = "") -> None:
+    """Set up a numbered Weixin account slot (weixin_2, weixin_3, …).
+
+    Runs QR login and writes credentials directly into config.yaml under
+    ``platforms.<slot>`` so the gateway can load multiple WeixinAdapter
+    instances at startup.
+    """
+    import asyncio
+    import re as _re
+
+    if not slot:
+        slot = _next_weixin_slot()
+
+    _n = slot.split("_", 1)[1]
+    print()
+    print(color(f"  ─── 💬 Weixin / WeChat — Account {_n} ({slot}) ───", Colors.CYAN))
+    print()
+    print_info(f"  This will add a second WeChat account as '{slot}'.")
+    print_info("  Credentials are stored in config.yaml under platforms." + slot + ".")
+
+    try:
+        from gateway.platforms.weixin import check_weixin_requirements, qr_login
+    except Exception as exc:
+        print_error(f"  Weixin adapter import failed: {exc}")
+        return
+
+    if not check_weixin_requirements():
+        print_error("  Missing dependencies: Weixin needs aiohttp and cryptography.")
+        return
+
+    if not prompt_yes_no("  Start QR login now?", True):
+        print_info("  Cancelled.")
+        return
+
+    try:
+        credentials = asyncio.run(qr_login(str(get_hermes_home())))
+    except KeyboardInterrupt:
+        print()
+        print_warning("  Weixin setup cancelled.")
+        return
+    except Exception as exc:
+        print_error(f"  QR login failed: {exc}")
+        return
+
+    if not credentials:
+        print_warning("  QR login did not complete.")
+        return
+
+    account_id = credentials.get("account_id", "")
+    token = credentials.get("token", "")
+    base_url = credentials.get("base_url", "")
+    user_id = credentials.get("user_id", "")
+
+    if not account_id or not token:
+        print_error("  QR login did not return account_id/token.")
+        return
+
+    # Write to config.yaml platforms.<slot> block
+    try:
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config()
+        platforms = cfg.setdefault("platforms", {})
+        slot_cfg = platforms.setdefault(slot, {})
+        slot_cfg["enabled"] = True
+        slot_cfg["token"] = token
+        extra = slot_cfg.setdefault("extra", {})
+        extra["account_id"] = account_id
+        if base_url:
+            extra["base_url"] = base_url.rstrip("/")
+        extra.setdefault("cdn_base_url", "https://novac2c.cdn.weixin.qq.com/c2c")
+        save_config(cfg)
+        print_success(f"  Credentials written to config.yaml [platforms.{slot}].")
+    except Exception as exc:
+        print_error(f"  Failed to save config: {exc}")
+        return
+
+    # Access policy
+    print()
+    access_choices = [
+        "Use DM pairing approval (recommended)",
+        "Allow all direct messages",
+        "Only allow listed user IDs",
+        "Disable direct messages",
+    ]
+    access_idx = prompt_choice("  How should direct messages be authorized?", access_choices, 0)
+    try:
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config()
+        extra = cfg["platforms"][slot].setdefault("extra", {})
+        if access_idx == 0:
+            extra["dm_policy"] = "pairing"
+        elif access_idx == 1:
+            extra["dm_policy"] = "open"
+        elif access_idx == 2:
+            default_allow = user_id or ""
+            allowlist = prompt(
+                "  Allowed Weixin user IDs (comma-separated)", default_allow
+            ).replace(" ", "")
+            extra["dm_policy"] = "allowlist"
+            extra["allow_from"] = allowlist
+        else:
+            extra["dm_policy"] = "disabled"
+        save_config(cfg)
+    except Exception as exc:
+        print_warning(f"  Could not save access policy: {exc}")
+
+    # Optional per-account model/provider override
+    print()
+    if prompt_yes_no("  Use a different AI model/provider for this account?", False):
+        _setup_weixin_slot_model_override(slot)
+
+    if user_id:
+        print()
+        if prompt_yes_no(f"  Use your Weixin user ID ({user_id}) as the home channel for {slot}?", True):
+            try:
+                from hermes_cli.config import load_config, save_config
+                cfg = load_config()
+                cfg["platforms"][slot]["home_channel"] = {"chat_id": user_id, "name": "Home"}
+                save_config(cfg)
+                print_success(f"  Home channel set to {user_id}")
+            except Exception:
+                pass
+
+    print()
+    print_success(f"Weixin account {_n} configured!")
+    print_info(f"  Account ID : {account_id}")
+    print_info(f"  Config key : platforms.{slot}")
+    print_info("  Restart the gateway to activate the new account.")
+
+    # Offer to add yet another
+    print()
+    if prompt_yes_no("  Add another WeChat account?", False):
+        _setup_weixin_slot_interactive()
+
+
+def _setup_weixin_slot_model_override(slot: str) -> None:
+    """Prompt for per-account model/provider and persist to config.yaml extra."""
+    print()
+    print_info("  Leave any field blank to keep the global setting.")
+    try:
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config()
+        extra = cfg.setdefault("platforms", {}).setdefault(slot, {}).setdefault("extra", {})
+
+        model_val = prompt("  Model (e.g. qwen3_6, gpt-4o)", extra.get("model", ""))
+        provider_val = prompt("  Provider (e.g. custom, openai)", extra.get("provider", ""))
+        base_url_val = prompt("  Base URL (e.g. http://token.cloudci.com/v1)", extra.get("base_url", ""))
+        api_key_val = prompt("  API key", extra.get("api_key", ""), password=True)
+
+        for k, v in [
+            ("model", model_val), ("provider", provider_val),
+            ("base_url", base_url_val), ("api_key", api_key_val),
+        ]:
+            v = (v or "").strip()
+            if v:
+                extra[k] = v
+            elif k in extra:
+                del extra[k]
+
+        save_config(cfg)
+        print_success("  Model/provider override saved.")
+    except Exception as exc:
+        print_warning(f"  Could not save model override: {exc}")
+
+
+def _weixin_slot_setup_fn(key: str):
+    """Return a setup thunk for a weixin_N slot key, or None if not a slot."""
+    import re as _re
+    if not _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", key):
+        return None
+    def _fn():
+        _setup_weixin_slot_interactive(slot=key)
+    return _fn
+
 
 def _setup_feishu():
     """Interactive setup for Feishu / Lark — scan-to-create or manual credentials."""
@@ -4778,7 +5033,7 @@ def _builtin_setup_fn(key: str):
         "feishu": _setup_feishu,
         "wecom": _setup_wecom,
         "qqbot": _setup_qqbot,
-    }.get(key)
+    }.get(key) or _weixin_slot_setup_fn(key)
 def _configure_platform(platform: dict) -> None:
     """Run the interactive setup flow for a single platform.
 
@@ -4792,6 +5047,11 @@ def _configure_platform(platform: dict) -> None:
     is needed here. User-installed platform plugins under ~/.hermes/plugins/
     must already be in ``plugins.enabled`` before they appear in this menu.
     """
+    # Weixin "add account" sentinel
+    if platform.get("_weixin_add"):
+        _setup_weixin_slot_interactive()
+        return
+
     entry = platform.get("_registry_entry")
 
     if entry is not None and entry.setup_fn is not None:

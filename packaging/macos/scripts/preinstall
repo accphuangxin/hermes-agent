@@ -1,0 +1,30 @@
+#!/bin/bash
+# packaging/macos/scripts/preinstall
+# Runs before payload is extracted.  Exit non-zero to abort installation.
+set -euo pipefail
+
+# Require macOS 13 (Ventura) or newer
+OS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
+if (( OS_MAJOR < 13 )); then
+    echo "error: hermes-agent requires macOS 13 (Ventura) or later." >&2
+    echo "       Your system is running macOS $(sw_vers -productVersion)." >&2
+    exit 1
+fi
+
+# Require Apple Silicon (this pkg is arm64-only)
+ARCH=$(uname -m)
+if [[ "${ARCH}" != "arm64" ]]; then
+    echo "error: This installer is built for Apple Silicon (arm64)." >&2
+    echo "       Your machine reports architecture: ${ARCH}" >&2
+    echo "       Please download the Intel (x86_64) installer instead." >&2
+    exit 1
+fi
+
+# If a previous installation exists, clean it out so we get a fresh venv
+INSTALL_DIR="/usr/local/hermes"
+if [[ -d "${INSTALL_DIR}/venv" ]]; then
+    echo "==> Removing previous hermes venv for clean upgrade"
+    rm -rf "${INSTALL_DIR}/venv"
+fi
+
+exit 0

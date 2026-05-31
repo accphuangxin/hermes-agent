@@ -962,6 +962,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -977,16 +978,41 @@ class APIServerAdapter(BasePlatformAdapter):
         key is meant to persist across transcripts so long-term memory
         providers (e.g. Honcho) can scope their per-chat state correctly
         — matching the semantics of the native gateway's ``session_key``.
+
+        ``model_override`` is the ``model`` field from the request body.  When
+        it matches a ``custom_providers`` entry (by name or model), that
+        entry's provider/base_url/api_key/model replace the global defaults.
+        When it doesn't match any entry the global config is used unchanged —
+        the field is treated as a display-only hint (e.g. "hermes-agent").
         """
         from run_agent import AIAgent
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
         from hermes_cli.tools_config import _get_platform_tools
+        from hermes_cli.config import get_compatible_custom_providers
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
         user_config = _load_gateway_config()
+
+        if model_override:
+            try:
+                _custom = get_compatible_custom_providers(user_config)
+                for entry in _custom:
+                    if entry.get("name") == model_override or entry.get("model") == model_override:
+                        runtime_kwargs["provider"] = "custom"
+                        runtime_kwargs["base_url"] = str(entry.get("base_url", "")).strip()
+                        runtime_kwargs["api_key"] = str(entry.get("api_key", "")).strip()
+                        if entry.get("model"):
+                            model = str(entry["model"]).strip()
+                        break
+                else:
+                    # model_override didn't match any custom_providers entry;
+                    # fall back to the global config model unchanged.
+                    pass
+            except Exception:
+                pass
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -1046,25 +1072,64 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — return hermes-agent as an available model."""
+        """GET /v1/models — return available models.
+
+        The primary entry is the configured model.default; additional entries
+        are synthesised from custom_providers so that clients can address each
+        provider by name.  owned_by reflects the active model.provider.
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
-        return web.json_response({
-            "object": "list",
-            "data": [
-                {
-                    "id": self._model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "hermes",
-                    "permission": [],
-                    "root": self._model_name,
-                    "parent": None,
-                }
-            ],
-        })
+        from gateway.run import _resolve_gateway_model, _load_gateway_config
+        from hermes_cli.config import get_compatible_custom_providers
+
+        user_config = _load_gateway_config()
+        primary_model = _resolve_gateway_model(user_config) or self._model_name
+
+        # owned_by: use configured provider, fall back to "hermes"
+        owned_by = "hermes"
+        try:
+            _model_cfg = user_config.get("model") or {}
+            if isinstance(_model_cfg, dict):
+                _provider = str(_model_cfg.get("provider") or "").strip()
+                if _provider:
+                    owned_by = _provider
+        except Exception:
+            pass
+
+        now = int(time.time())
+
+        def _entry(model_id: str, owner: str) -> Dict[str, Any]:
+            return {
+                "id": model_id,
+                "object": "model",
+                "created": now,
+                "owned_by": owner,
+                "permission": [],
+                "root": model_id,
+                "parent": None,
+            }
+
+        data: List[Dict[str, Any]] = [_entry(primary_model, owned_by)]
+
+        # Append one entry per custom_providers model so clients can route by
+        # provider name (e.g. "CloudCI" or the configured model string).
+        seen_ids: set = {primary_model}
+        try:
+            for cp in get_compatible_custom_providers(user_config):
+                cp_name = str(cp.get("name") or "").strip()
+                cp_model = str(cp.get("model") or "").strip()
+                cp_owner = str(cp.get("provider_key") or cp.get("name") or "custom").strip()
+                for model_id in filter(None, dict.fromkeys([cp_name, cp_model])):
+                    if model_id not in seen_ids:
+                        data.append(_entry(model_id, cp_owner))
+                        seen_ids.add(model_id)
+        except Exception:
+            pass
+
+        return web.json_response({"object": "list", "data": data})
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
@@ -1868,6 +1933,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                model_override=model_name,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1887,6 +1953,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                model_override=model_name,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2900,6 +2967,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                model_override=body.get("model") or None,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2933,6 +3001,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                model_override=body.get("model") or None,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3435,6 +3504,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3458,6 +3528,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
+                model_override=model_override,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent

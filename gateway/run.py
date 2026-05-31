@@ -2488,6 +2488,38 @@ class GatewayRunner:
             except Exception:
                 pass
 
+        # Per-platform model/provider overrides from platforms.<name>.extra.
+        # Allows each WeChat account (or any platform) to use a different
+        # provider/model independent of the global config.
+        # Keys: model, provider, base_url, api_key
+        # A session-level /model override (above) already returned early, so
+        # this only applies when no session override is active.
+        if source is not None:
+            try:
+                plat_cfg = self.config.platforms.get(source.platform)
+                if plat_cfg is not None:
+                    extra = plat_cfg.extra or {}
+                    plat_model = str(extra.get("model") or "").strip()
+                    plat_provider = str(extra.get("provider") or "").strip()
+                    plat_base_url = str(extra.get("base_url") or "").strip()
+                    plat_api_key = str(extra.get("api_key") or "").strip()
+                    if plat_model:
+                        model = plat_model
+                    if plat_provider:
+                        runtime_kwargs["provider"] = plat_provider
+                    if plat_base_url:
+                        runtime_kwargs["base_url"] = plat_base_url
+                    if plat_api_key:
+                        runtime_kwargs["api_key"] = plat_api_key
+                    if plat_model or plat_provider:
+                        logger.debug(
+                            "Per-platform runtime override: platform=%s model=%s provider=%s",
+                            source.platform.value, model or "(unchanged)",
+                            runtime_kwargs.get("provider", "(unchanged)"),
+                        )
+            except Exception:
+                pass
+
         return model, runtime_kwargs
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
@@ -6480,7 +6512,10 @@ class GatewayRunner:
                 return None
             return WeComAdapter(config)
 
-        elif platform == Platform.WEIXIN:
+        elif platform == Platform.WEIXIN or (
+            hasattr(platform, "value")
+            and __import__("re").fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", platform.value)
+        ):
             from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
             if not check_weixin_requirements():
                 logger.warning("Weixin: aiohttp/cryptography not installed")

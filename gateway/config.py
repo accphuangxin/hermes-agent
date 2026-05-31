@@ -134,6 +134,10 @@ class Platform(Enum):
         Creates a pseudo-member cached in ``_value2member_map_`` so that
         ``Platform("irc") is Platform("irc")`` holds True (identity-stable).
         Arbitrary strings are rejected to prevent enum pollution.
+
+        Multi-account WeChat slots (``weixin_2``, ``weixin_3``, …) are also
+        accepted so that ``platforms.weixin_2:`` entries in config.yaml work
+        without any plugin registration.
         """
         if not isinstance(value, str) or not value.strip():
             return None
@@ -142,6 +146,16 @@ class Platform(Enum):
         # Check cache first (another call may have created it already)
         if value in cls._value2member_map_:
             return cls._value2member_map_[value]
+
+        # Weixin multi-account slots: weixin_2, weixin_3, …
+        import re as _re
+        if _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", value):
+            pseudo = object.__new__(cls)
+            pseudo._value_ = value
+            pseudo._name_ = value.upper()
+            cls._value2member_map_[value] = pseudo
+            cls._member_map_[pseudo._name_] = pseudo
+            return pseudo
 
         # Only create pseudo-members for bundled plugin platforms (discovered
         # via filesystem scan) or runtime-registered plugin platforms.
@@ -446,6 +460,26 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
 }
+
+_WEIXIN_SLOT_CONNECTED_CHECKER = lambda cfg: bool(
+    cfg.extra.get("account_id") and (cfg.token or cfg.extra.get("token"))
+)
+
+
+def is_platform_connected(platform: "Platform", cfg: "PlatformConfig") -> bool:
+    """Return True when *platform* is sufficiently configured.
+
+    Falls back to the generic token/api_key check for platforms not in
+    ``_PLATFORM_CONNECTED_CHECKERS``.  Weixin multi-account slots
+    (``weixin_2``, …) share the same checker as ``WEIXIN``.
+    """
+    import re as _re
+    checker = _PLATFORM_CONNECTED_CHECKERS.get(platform)
+    if checker is None and _re.fullmatch(r"weixin_[2-9]|weixin_[1-9]\d+", platform.value):
+        checker = _WEIXIN_SLOT_CONNECTED_CHECKER
+    if checker is not None:
+        return bool(checker(cfg))
+    return bool(cfg.token or cfg.api_key)
 
 
 @dataclass

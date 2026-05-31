@@ -158,6 +158,35 @@ _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
 # save_config() + migrate_config() write via atomic_yaml_write which
 # produces a fresh inode, so stat() sees a new mtime_ns and the next
 # load repopulates automatically — no explicit invalidation hook.
+# Built-in custom providers injected at runtime into every loaded config.
+# User entries with the same base_url take precedence (they are never overwritten).
+_BUILTIN_CUSTOM_PROVIDERS: list = [
+    {
+        "name": "CloudCI",
+        "base_url": "http://token.cloudci.com/v1",
+        "api_key": "",
+        "model": "qwen3_6",
+    },
+    # Append more built-in providers here.
+]
+
+
+def _inject_builtin_custom_providers(config: dict) -> None:
+    existing: list = config.get("custom_providers")
+    if not isinstance(existing, list):
+        existing = []
+        config["custom_providers"] = existing
+    existing_urls = {
+        str(e.get("base_url", "")).rstrip("/").lower()
+        for e in existing if isinstance(e, dict)
+    }
+    for builtin in _BUILTIN_CUSTOM_PROVIDERS:
+        url = str(builtin.get("base_url", "")).rstrip("/").lower()
+        if url and url not in existing_urls:
+            existing.append(dict(builtin))
+            existing_urls.add(url)
+
+
 _LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
 # (path, mtime_ns, size) -> cached raw yaml dict. Same pattern as
 # _LOAD_CONFIG_CACHE but for read_raw_config() — used when callers want
@@ -4778,6 +4807,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
         expanded = _expand_env_vars(normalized)
+        _inject_builtin_custom_providers(expanded)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``

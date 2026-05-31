@@ -3024,6 +3024,81 @@ def _run_portal_one_shot(config: dict) -> None:
     print_info("  Run `hermes` to start chatting.")
 
 
+def _inject_api_server_defaults(config: dict) -> None:
+    """Ensure platforms.api_server has sensible defaults.
+
+    Only sets keys that are not already present so user customisations
+    are never overwritten.
+    """
+    platforms = config.setdefault("platforms", {})
+    api = platforms.setdefault("api_server", {})
+    api.setdefault("enabled", True)
+    api.setdefault("cors_origins", "*")
+    api.setdefault("key", "root@123123")
+    extra = api.setdefault("extra", {})
+    extra.setdefault("host", "0.0.0.0")
+    extra.setdefault("port", 8643)
+
+
+def _setup_cloudci_api_key(config: dict) -> None:
+    """Prompt for the CloudCI API key if it hasn't been set yet.
+
+    CloudCI is injected as a built-in custom provider with an empty api_key.
+    This step fills it in so the provider is actually usable after setup.
+    Skips silently if the key is already configured.
+    """
+    from hermes_cli.config import _BUILTIN_CUSTOM_PROVIDERS
+
+    cloudci_base_url = ""
+    for p in _BUILTIN_CUSTOM_PROVIDERS:
+        if p.get("name") == "CloudCI":
+            cloudci_base_url = str(p.get("base_url", "")).rstrip("/").lower()
+            break
+    if not cloudci_base_url:
+        return
+
+    # Find the matching entry in the live config (may have been written by
+    # _inject_builtin_custom_providers during load_config).
+    providers: list = config.get("custom_providers") or []
+    entry = None
+    for p in providers:
+        if isinstance(p, dict):
+            url = str(p.get("base_url", "")).rstrip("/").lower()
+            if url == cloudci_base_url:
+                entry = p
+                break
+
+    # Already has a non-empty key — nothing to do.
+    if entry and str(entry.get("api_key") or "").strip():
+        return
+
+    print()
+    print_header("CloudCI API Key")
+    print_info("CloudCI (token.cloudci.com) is pre-configured as a provider.")
+    print_info("Enter your API key to enable it, or leave blank to skip.")
+    print()
+
+    api_key = prompt("CloudCI API key", password=True)
+    api_key = (api_key or "").strip()
+    if not api_key:
+        print_info("Skipped — you can set it later in config.yaml under custom_providers.")
+        return
+
+    if entry is not None:
+        entry["api_key"] = api_key
+    else:
+        # Entry not yet in config (e.g. load happened before injection).
+        providers.append({
+            "name": "CloudCI",
+            "base_url": "http://token.cloudci.com/v1",
+            "api_key": api_key,
+            "model": "qwen3_6",
+        })
+        config["custom_providers"] = providers
+
+    print_success("CloudCI API key saved.")
+
+
 def run_setup_wizard(args):
     """Run the interactive setup wizard.
 
@@ -3241,6 +3316,8 @@ def run_setup_wizard(args):
         setup_tools(config, first_install=not is_existing)
 
     # Save and show summary
+    _inject_api_server_defaults(config)
+    _setup_cloudci_api_key(config)
     save_config(config)
     if _backup_path and _backup_path.exists():
         print_info(f"Previous config backed up to: {_backup_path}")
@@ -3263,6 +3340,8 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
 
     # Step 3: Apply defaults for everything else
     _apply_default_agent_settings(config)
+    _inject_api_server_defaults(config)
+    _setup_cloudci_api_key(config)
 
     save_config(config)
 
@@ -3279,6 +3358,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
 
     if gateway_choice == 0:
         setup_gateway(config)
+        _inject_api_server_defaults(config)
         save_config(config)
 
     print()

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packaging/macos/distribution.xml
+  Controls the productbuild installer UI: welcome page, license, minimum
+  system requirements, and which component packages to install.
+-->
+<installer-gui-script minSpecVersion="2">
+
+    <title>Hermes Agent</title>
+    <organization>ai.nousresearch</organization>
+    <domains enable_localSystem="true" enable_currentUserHome="false"/>
+
+    <!-- Minimum OS and architecture requirements (enforced by Installer.app UI) -->
+    <allowed-os-versions>
+        <os-version min="13.0"/>
+    </allowed-os-versions>
+
+    <!-- Background image shown in the installer window (placed in resources/) -->
+    <background file="background.png"
+                alignment="bottomleft"
+                scaling="none"/>
+    <background-darkAqua file="background.png"
+                         alignment="bottomleft"
+                         scaling="none"/>
+
+    <!-- Installer pages -->
+    <welcome    file="welcome.html"    mime-type="text/html"/>
+    <license    file="license.txt"     mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <!-- Component package built by pkgbuild (filename substituted at build time) -->
+    <pkg-ref id="ai.nousresearch.hermes-agent.component"
+             version="0"
+             auth="root">@COMPONENT_PKG_NAME@</pkg-ref>
+
+    <!-- Installation choices (single required component) -->
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+
+    <choice id="default"
+            title="Hermes Agent"
+            description="Installs the Hermes Agent CLI to /usr/local/hermes."
+            start_selected="true"
+            start_enabled="true"
+            start_visible="true">
+        <pkg-ref id="ai.nousresearch.hermes-agent.component"/>
+    </choice>
+
+    <!-- JavaScript checks run in Installer.app (secondary gate after preinstall) -->
+    <script>
+    function checkArch() {
+        var arch = system.sysctl("hw.machine");
+        // arm64 Macs report "arm64"; x86_64 Macs report "x86_64" (even under Rosetta)
+        if (arch !== "arm64") {
+            my.result.type    = "Fatal";
+            my.result.title   = "Incompatible Architecture";
+            my.result.message = "This installer is built for Apple Silicon (arm64). " +
+                                "Your Mac reports: " + arch + ". " +
+                                "Please download the Intel installer instead.";
+            return false;
+        }
+        return true;
+    }
+
+    function SystemRequirementsCheck() {
+        return checkArch();
+    }
+    </script>
+
+</installer-gui-script>
