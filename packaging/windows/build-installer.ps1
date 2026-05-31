@@ -154,72 +154,70 @@ Source: "$STAGING_DIR\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Name: "{group}\Hermes Agent"; Filename: "{app}\venv\Scripts\hermes.exe"
 Name: "{group}\Uninstall Hermes Agent"; Filename: "{uninstallexe}"
 
-[Registry]
-; Add {app}\bin to system PATH
-Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; \
-  ValueType: expandsz; ValueName: "Path"; \
-  ValueData: "{olddata};{app}\bin"; \
-  Check: not RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', '') or (Pos(ExpandConstant('{app}\bin'), RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', '')) = 0)
-
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-// Rewrite launcher .cmd files with the actual install path after copying.
+const
+  PathRegKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+
+// Rewrite launcher .cmd files with the actual install path.
 procedure FixLaunchers();
 var
-  appDir: String;
-  cmds: TStringList;
+  appDir, cmdName, content: String;
   i: Integer;
-  cmdName: String;
-  content: String;
+  cmds: array[0..2] of String;
 begin
   appDir := ExpandConstant('{app}');
-  cmds := TStringList.Create;
-  cmds.Add('hermes');
-  cmds.Add('hermes-agent');
-  cmds.Add('hermes-acp');
-  try
-    for i := 0 to cmds.Count - 1 do begin
-      cmdName := cmds[i];
-      content := '@echo off' + #13#10 + '"' + appDir + '\venv\Scripts\' + cmdName + '.exe" %*' + #13#10;
-      SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', content, False);
-    end;
-  finally
-    cmds.Free;
+  cmds[0] := 'hermes';
+  cmds[1] := 'hermes-agent';
+  cmds[2] := 'hermes-acp';
+  for i := 0 to 2 do begin
+    cmdName := cmds[i];
+    content := '@echo off' + #13#10 +
+               '"' + appDir + '\venv\Scripts\' + cmdName + '.exe" %*' + #13#10;
+    SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', content, False);
+  end;
+end;
+
+// Add {app}\bin to system PATH (skip if already present).
+procedure AddToPath();
+var
+  pathVal, appBin: String;
+begin
+  appBin := ExpandConstant('{app}\bin');
+  if not RegQueryStringValue(HKLM, PathRegKey, 'Path', pathVal) then
+    pathVal := '';
+  if Pos(LowerCase(appBin), LowerCase(pathVal)) = 0 then begin
+    if (pathVal <> '') and (pathVal[Length(pathVal)] <> ';') then
+      pathVal := pathVal + ';';
+    pathVal := pathVal + appBin;
+    RegWriteExpandStringValue(HKLM, PathRegKey, 'Path', pathVal);
   end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
+  if CurStep = ssPostInstall then begin
     FixLaunchers();
+    AddToPath();
+  end;
 end;
 
-// Remove {app}\bin from PATH on uninstall
+// Remove {app}\bin from PATH on uninstall.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  pathVar, appBin, newPath: String;
-  p: Integer;
+  pathVal, appBin, newPath: String;
 begin
   if CurUninstallStep = usPostUninstall then begin
     appBin := ExpandConstant('{app}\bin');
-    if RegQueryStringValue(HKLM,
-      'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
-      'Path', pathVar) then
-    begin
-      p := Pos(';' + appBin, pathVar);
-      if p = 0 then p := Pos(appBin + ';', pathVar);
-      if p = 0 then p := Pos(appBin, pathVar);
-      if p > 0 then begin
-        newPath := pathVar;
-        StringChangeEx(newPath, ';' + appBin, '', True);
-        StringChangeEx(newPath, appBin + ';', '', True);
-        StringChangeEx(newPath, appBin,       '', True);
-        RegWriteExpandStringValue(HKLM,
-          'SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
-          'Path', newPath);
-      end;
+    if RegQueryStringValue(HKLM, PathRegKey, 'Path', pathVal) then begin
+      newPath := pathVal;
+      StringChangeEx(newPath, ';' + appBin, '', True);
+      StringChangeEx(newPath, appBin + ';', '', True);
+      StringChangeEx(newPath, appBin,       '', True);
+      if newPath <> pathVal then
+        RegWriteExpandStringValue(HKLM, PathRegKey, 'Path', newPath);
     end;
   end;
 end;
