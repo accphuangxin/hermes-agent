@@ -176,7 +176,7 @@ productbuild \
     --distribution "${DIST_XML_TMP}" \
     --resources "$(pwd)/packaging/macos/resources" \
     --package-path "${BUILD_DIR}" \
-    "${SIGN_ARGS[@]}" \
+    ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} \
     "${OUTPUT_PKG}"
 
 echo ""
