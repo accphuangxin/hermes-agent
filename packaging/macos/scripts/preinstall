@@ -20,11 +20,4 @@ if [[ "${ARCH}" != "arm64" ]]; then
     exit 1
 fi
 
-# If a previous installation exists, clean it out so we get a fresh venv
-INSTALL_DIR="/usr/local/hermes"
-if [[ -d "${INSTALL_DIR}/venv" ]]; then
-    echo "==> Removing previous hermes venv for clean upgrade"
-    rm -rf "${INSTALL_DIR}/venv"
-fi
-
 exit 0
