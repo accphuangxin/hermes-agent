@@ -11,13 +11,22 @@ if (( OS_MAJOR < 13 )); then
     exit 1
 fi
 
-# Require Apple Silicon (this pkg is arm64-only)
-ARCH=$(uname -m)
-if [[ "${ARCH}" != "arm64" ]]; then
+# Require Apple Silicon (this pkg is arm64-only).
+# Use sysctl hw.optional.arm64 instead of uname -m — the latter returns
+# x86_64 when the script is invoked under Rosetta translation, causing a
+# false-positive failure on Apple Silicon machines.
+IS_ARM64=$(sysctl -n hw.optional.arm64 2>/dev/null || echo "0")
+if [[ "${IS_ARM64}" != "1" ]]; then
     echo "error: This installer is built for Apple Silicon (arm64)." >&2
-    echo "       Your machine reports architecture: ${ARCH}" >&2
     echo "       Please download the Intel (x86_64) installer instead." >&2
     exit 1
+fi
+
+# Remove stale venv before payload extraction so the new venv installs cleanly.
+INSTALL_DIR="/usr/local/hermes"
+if [[ -d "${INSTALL_DIR}/venv" ]]; then
+    echo "==> Removing previous venv for clean install"
+    rm -rf "${INSTALL_DIR}/venv"
 fi
 
 exit 0

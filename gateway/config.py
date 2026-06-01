@@ -1690,7 +1690,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             extra["account_id"] = weixin_account_id
         weixin_base_url = os.getenv("WEIXIN_BASE_URL", "").strip()
         if weixin_base_url:
-            extra["base_url"] = weixin_base_url.rstrip("/")
+            extra["ilink_base_url"] = weixin_base_url.rstrip("/")
         weixin_cdn_base_url = os.getenv("WEIXIN_CDN_BASE_URL", "").strip()
         if weixin_cdn_base_url:
             extra["cdn_base_url"] = weixin_cdn_base_url.rstrip("/")

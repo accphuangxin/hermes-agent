@@ -15,6 +15,11 @@
         <os-version min="13.0"/>
     </allowed-os-versions>
 
+    <!-- Prevent Installer.app from re-launching under Rosetta for arm64-only packages -->
+    <hostArchitectures>
+        <arch>arm64</arch>
+    </hostArchitectures>
+
     <!-- Background image shown in the installer window (placed in resources/) -->
     <background file="background.png"
                 alignment="bottomleft"
@@ -47,25 +52,5 @@
         <pkg-ref id="ai.nousresearch.hermes-agent.component"/>
     </choice>
 
-    <!-- JavaScript checks run in Installer.app (secondary gate after preinstall) -->
-    <script>
-    function checkArch() {
-        var arch = system.sysctl("hw.machine");
-        // arm64 Macs report "arm64"; x86_64 Macs report "x86_64" (even under Rosetta)
-        if (arch !== "arm64") {
-            my.result.type    = "Fatal";
-            my.result.title   = "Incompatible Architecture";
-            my.result.message = "This installer is built for Apple Silicon (arm64). " +
-                                "Your Mac reports: " + arch + ". " +
-                                "Please download the Intel installer instead.";
-            return false;
-        }
-        return true;
-    }
-
-    function SystemRequirementsCheck() {
-        return checkArch();
-    }
-    </script>
 
 </installer-gui-script>

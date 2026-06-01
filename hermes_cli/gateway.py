@@ -3086,33 +3086,42 @@ def launchd_restart():
     label = get_launchd_label()
     target = f"{_launchd_domain()}/{label}"
     drain_timeout = _get_restart_drain_timeout()
+    plist_path = get_launchd_plist_path()
     from gateway.status import get_running_pid
 
-    try:
-        pid = get_running_pid()
-        if pid is not None and _request_gateway_self_restart(pid):
-            print("✓ Service restart requested")
-            return
+    # Prefer a self-restart signal so the gateway drains cleanly.
+    pid = get_running_pid()
+    if pid is not None and _request_gateway_self_restart(pid):
+        print("✓ Service restart requested")
+        return
+
+    # Stop the running process gracefully before touching launchd.
+    if pid is not None:
+        try:
+            terminate_pid(pid, force=False)
+        except (ProcessLookupError, PermissionError, OSError):
+            pid = None
         if pid is not None:
-            try:
-                terminate_pid(pid, force=False)
-            except (ProcessLookupError, PermissionError, OSError):
-                pid = None
-            if pid is not None:
-                exited = _wait_for_gateway_exit(timeout=drain_timeout, force_after=None)
-                if not exited:
-                    print(f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart")
-        subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
-        print("✓ Service restarted")
-    except subprocess.CalledProcessError as e:
-        if e.returncode not in {3, 113}:
-            raise
-        # Job not loaded — bootstrap and start fresh
-        print("↻ launchd job was unloaded; reloading")
-        plist_path = get_launchd_plist_path()
-        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-        subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
-        print("✓ Service restarted")
+            exited = _wait_for_gateway_exit(timeout=drain_timeout, force_after=5.0)
+            if not exited:
+                print(f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — force-killing")
+                try:
+                    terminate_pid(pid, force=True)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
+    # bootout + bootstrap + kickstart avoids the hang that `kickstart -k`
+    # causes: -k waits for the old process to exit AND the new one to reach
+    # a "running" state, which can block indefinitely if launchd throttles
+    # the job.  Doing it in two steps returns immediately after the new
+    # process is spawned.
+    subprocess.run(["launchctl", "bootout", target], check=False, timeout=30)
+    if not plist_path.exists():
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+    subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+    subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
+    print("✓ Service restarted")
 
 def launchd_status(deep: bool = False):
     plist_path = get_launchd_plist_path()

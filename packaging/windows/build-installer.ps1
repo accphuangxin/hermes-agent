@@ -205,7 +205,7 @@ begin
   end;
 end;
 
-// Remove {app}\bin from PATH on uninstall.
+// Remove PATH entry on uninstall.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   pathVal, appBin, newPath: String;
