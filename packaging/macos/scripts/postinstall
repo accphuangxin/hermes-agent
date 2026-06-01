@@ -1,76 +1,106 @@
 #!/bin/bash
 # packaging/macos/scripts/postinstall
-# Runs after the payload is extracted to /usr/local/hermes.
-#
-# The venv was built on the build machine with the payload root as the
-# prefix, so every shebang line and pyvenv.cfg still points to the
-# build machine's temporary path:
-#   /path/to/build/macos-pkg/payload/usr/local/hermes/venv/...
-#
-# This script replaces every occurrence of that build-time prefix with
-# the real install path (/usr/local/hermes), making the venv fully
-# relocatable without any re-download or re-install.
+# Rewrites build-machine paths in the venv to the real install location,
+# then verifies the installation.
 set -euo pipefail
 
 INSTALL_DIR="/usr/local/hermes"
 VENV_DIR="${INSTALL_DIR}/venv"
 BIN_DIR="/usr/local/bin"
+PYTHON_BIN="${INSTALL_DIR}/bin/python3"   # embedded PBS Python (always at correct path)
 
-# ── Detect the build-machine prefix embedded in the venv ──────────────────────
-# pyvenv.cfg always contains the absolute path used at venv-creation time.
-PYVENV_CFG="${VENV_DIR}/pyvenv.cfg"
-if [[ ! -f "${PYVENV_CFG}" ]]; then
-    echo "error: ${PYVENV_CFG} not found — venv missing from payload?" >&2
-    exit 1
-fi
-
-# Extract the home path (the directory that contains the Python binary used
-# to create the venv). Strip the trailing /bin to get the root prefix.
-BUILD_PYTHON_HOME=$(grep '^home = ' "${PYVENV_CFG}" | sed 's/^home = //')
-# BUILD_PYTHON_HOME is e.g. /…/payload/usr/local/hermes/bin
-# Strip everything up to and including the payload root to get what needs
-# replacing: /…/build/macos-pkg/payload/usr/local/hermes
-BUILD_PREFIX="${BUILD_PYTHON_HOME%/bin}"
-
-if [[ -z "${BUILD_PREFIX}" || "${BUILD_PREFIX}" == "${INSTALL_DIR}" ]]; then
-    # Paths already correct (e.g. built directly in /usr/local/hermes) —
-    # nothing to rewrite.
-    echo "==> Venv paths already point to ${INSTALL_DIR}, no rewrite needed."
-else
-    echo "==> Rewriting venv paths"
-    echo "    from: ${BUILD_PREFIX}"
-    echo "    to:   ${INSTALL_DIR}"
-
-    # 1. Rewrite all text-mode scripts in venv/bin (shebang lines).
-    #    Use LC_ALL=C so grep/sed treat bytes literally (safe for binary-mixed files).
-    while IFS= read -r -d '' script; do
-        # Skip non-text files (compiled extensions, .pyc, etc.)
-        if file "${script}" 2>/dev/null | grep -q "text"; then
-            LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${script}" 2>/dev/null || true
-        fi
-    done < <(find "${VENV_DIR}/bin" -maxdepth 1 -type f -print0)
-
-    # 2. Rewrite pyvenv.cfg (home =, base-prefix, base-exec-prefix lines).
-    LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${PYVENV_CFG}"
-
-    # 3. Rewrite any __editable__*.pth or direct_url.json that contain the
-    #    build prefix (only present when installed with pip install -e or
-    #    when pip writes dist-info with absolute paths).
-    SITE_PACKAGES=$(find "${VENV_DIR}/lib" -maxdepth 2 -name "site-packages" -type d | head -1)
-    if [[ -n "${SITE_PACKAGES}" ]]; then
-        find "${SITE_PACKAGES}" \
-            \( -name "*.pth" -o -name "direct_url.json" -o -name "RECORD" \) \
-            -print0 | while IFS= read -r -d '' f; do
-            LC_ALL=C sed -i '' "s|${BUILD_PREFIX}|${INSTALL_DIR}|g" "${f}" 2>/dev/null || true
-        done
-    fi
-fi
-
-# ── Ensure /usr/local/bin exists and permissions are correct ──────────────────
+# ── Ensure /usr/local/bin exists ──────────────────────────────────────────────
 if [[ ! -d "${BIN_DIR}" ]]; then
     mkdir -p "${BIN_DIR}"
 fi
 
+# ── Rewrite build-machine paths using the embedded Python ─────────────────────
+# The venv was created at build time inside the payload staging area, so all
+# shebang lines and pyvenv.cfg point to a path like:
+#   /Users/runner/work/.../build/macos-pkg/payload/usr/local/hermes/...
+# We need to replace that prefix with /usr/local/hermes.
+#
+# Using the embedded Python (not the venv) avoids bash/sed pipe-exit-code
+# issues under 'set -euo pipefail' and handles binary files safely.
+echo "==> Relocating venv paths to ${INSTALL_DIR}"
+
+"${PYTHON_BIN}" - "${INSTALL_DIR}" "${VENV_DIR}" <<'PYEOF'
+import os, sys
+
+install_dir = sys.argv[1]
+venv_dir    = sys.argv[2]
+pyvenv_cfg  = os.path.join(venv_dir, 'pyvenv.cfg')
+
+# ── Read build prefix from pyvenv.cfg ──
+build_prefix = None
+try:
+    with open(pyvenv_cfg) as f:
+        for line in f:
+            if line.startswith('home = '):
+                python_home = line.split('=', 1)[1].strip()
+                # home = /BUILD_ROOT/payload/usr/local/hermes/bin
+                # strip trailing /bin to get the venv root prefix
+                build_prefix = python_home.rstrip('/')
+                if build_prefix.endswith('/bin'):
+                    build_prefix = build_prefix[:-4]
+                break
+except Exception as e:
+    print(f'    Warning: could not read pyvenv.cfg: {e}')
+
+if not build_prefix or build_prefix == install_dir:
+    print('    Paths already correct — no rewrite needed.')
+    sys.exit(0)
+
+print(f'    from: {build_prefix}')
+print(f'    to:   {install_dir}')
+
+old_bytes = build_prefix.encode()
+new_bytes = install_dir.encode()
+
+def rewrite(path):
+    """Replace old_bytes with new_bytes in path (binary-safe)."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        if old_bytes not in data:
+            return
+        with open(path, 'wb') as f:
+            f.write(data.replace(old_bytes, new_bytes))
+        print(f'    rewrote: {os.path.relpath(path, venv_dir)}')
+    except Exception as e:
+        print(f'    skip {os.path.basename(path)}: {e}')
+
+# 1. Scripts in venv/bin (shebang lines)
+bin_path = os.path.join(venv_dir, 'bin')
+if os.path.isdir(bin_path):
+    for name in sorted(os.listdir(bin_path)):
+        fpath = os.path.join(bin_path, name)
+        if os.path.isfile(fpath) and not os.path.islink(fpath):
+            rewrite(fpath)
+
+# 2. pyvenv.cfg
+rewrite(pyvenv_cfg)
+
+# 3. .pth / RECORD / direct_url.json in site-packages
+lib_dir = os.path.join(venv_dir, 'lib')
+if os.path.isdir(lib_dir):
+    for root, _dirs, files in os.walk(lib_dir):
+        for name in files:
+            if name.endswith(('.pth', '.json')) or name == 'RECORD':
+                rewrite(os.path.join(root, name))
+
+print('    Done.')
+PYEOF
+
+# ── Verify the venv works ─────────────────────────────────────────────────────
+echo "==> Verifying installation"
+if ! "${VENV_DIR}/bin/python3" -c "import hermes_cli" 2>/dev/null; then
+    echo "error: venv verification failed — hermes_cli not importable" >&2
+    exit 1
+fi
+echo "    OK"
+
+# ── Fix permissions ───────────────────────────────────────────────────────────
 chmod -R a+rX "${INSTALL_DIR}"
 chmod 755 "${BIN_DIR}/hermes" "${BIN_DIR}/hermes-agent" "${BIN_DIR}/hermes-acp" 2>/dev/null || true
 
