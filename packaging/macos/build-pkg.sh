@@ -118,6 +118,7 @@ VENV_PIP="${PAYLOAD_DIR}${INSTALL_PREFIX}/venv/bin/pip"
 # intentionally excluded — they lazy-install at first use via lazy_deps.py.
 "${VENV_PIP}" install --quiet \
     "${SDIST_BUILT}[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms]"
+"${VENV_PIP}" install --quiet "qrcode==7.4.2"
 
 # ── Step 3: Write launcher scripts into payload ───────────────────────────────
 echo "==> Writing launcher scripts"

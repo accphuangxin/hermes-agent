@@ -106,6 +106,7 @@ $Pip = "$VenvDir\Scripts\pip.exe"
 Write-Host "==> Installing hermes-agent"
 & $Pip install --quiet --upgrade pip wheel
 & $Pip install --quiet "$($sdist.FullName)[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms]"
+& $Pip install --quiet "qrcode==7.4.2"
 
 Write-Host "==> Verifying install"
 & "$VenvDir\Scripts\hermes.exe" --version 2>&1 | Write-Host
