@@ -117,7 +117,7 @@ VENV_PIP="${PAYLOAD_DIR}${INSTALL_PREFIX}/venv/bin/pip"
 # Heavy optional backends (anthropic, voice, messaging, modal, etc.) are
 # intentionally excluded — they lazy-install at first use via lazy_deps.py.
 "${VENV_PIP}" install --quiet \
-    "${SDIST_BUILT}[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms]"
+    "${SDIST_BUILT}[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms,anthropic]"
 "${VENV_PIP}" install --quiet "qrcode==7.4.2"
 
 # ── Step 3: Write launcher scripts into payload ───────────────────────────────

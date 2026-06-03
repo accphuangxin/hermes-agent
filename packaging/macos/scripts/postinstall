@@ -39,7 +39,7 @@ try:
             if line.startswith('home = '):
                 python_home = line.split('=', 1)[1].strip()
                 # home = /BUILD_ROOT/payload/usr/local/hermes/bin
-                # strip trailing /bin to get the venv root prefix
+                # strip trailing /bin to get the install root prefix
                 build_prefix = python_home.rstrip('/')
                 if build_prefix.endswith('/bin'):
                     build_prefix = build_prefix[:-4]
@@ -49,53 +49,95 @@ except Exception as e:
 
 if not build_prefix or build_prefix == install_dir:
     print('    Paths already correct — no rewrite needed.')
-    sys.exit(0)
+else:
+    print(f'    from: {build_prefix}')
+    print(f'    to:   {install_dir}')
 
-print(f'    from: {build_prefix}')
-print(f'    to:   {install_dir}')
+    old_bytes = build_prefix.encode()
+    new_bytes = install_dir.encode()
 
-old_bytes = build_prefix.encode()
-new_bytes = install_dir.encode()
+    def rewrite(path):
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+            if old_bytes not in data:
+                return
+            with open(path, 'wb') as f:
+                f.write(data.replace(old_bytes, new_bytes))
+            print(f'    rewrote: {os.path.relpath(path, venv_dir)}')
+        except Exception as e:
+            print(f'    skip {os.path.basename(path)}: {e}')
 
-def rewrite(path):
-    """Replace old_bytes with new_bytes in path (binary-safe)."""
-    try:
-        with open(path, 'rb') as f:
-            data = f.read()
-        if old_bytes not in data:
-            return
-        with open(path, 'wb') as f:
-            f.write(data.replace(old_bytes, new_bytes))
-        print(f'    rewrote: {os.path.relpath(path, venv_dir)}')
-    except Exception as e:
-        print(f'    skip {os.path.basename(path)}: {e}')
+    # 1. Scripts in venv/bin (shebang lines, skip symlinks)
+    bin_path = os.path.join(venv_dir, 'bin')
+    if os.path.isdir(bin_path):
+        for name in sorted(os.listdir(bin_path)):
+            fpath = os.path.join(bin_path, name)
+            if os.path.isfile(fpath) and not os.path.islink(fpath):
+                rewrite(fpath)
 
-# 1. Scripts in venv/bin (shebang lines)
+    # 2. pyvenv.cfg
+    rewrite(pyvenv_cfg)
+
+    # 3. .pth / RECORD / direct_url.json in site-packages
+    lib_dir = os.path.join(venv_dir, 'lib')
+    if os.path.isdir(lib_dir):
+        for root, _dirs, files in os.walk(lib_dir):
+            for name in files:
+                if name.endswith(('.pth', '.json')) or name == 'RECORD':
+                    rewrite(os.path.join(root, name))
+
+# ── Fix symlinks in venv/bin that point to build-machine absolute paths ──
+# venv/bin/python3 etc. are symlinks to the embedded Python binary.
+# They must point to the real install location, not the build-machine path.
 bin_path = os.path.join(venv_dir, 'bin')
+python_bin = os.path.join(install_dir, 'bin', 'python3')
+python_bin_versioned = os.path.join(install_dir, 'bin', 'python3.11')
+
+fixed_symlinks = 0
 if os.path.isdir(bin_path):
     for name in sorted(os.listdir(bin_path)):
         fpath = os.path.join(bin_path, name)
-        if os.path.isfile(fpath) and not os.path.islink(fpath):
-            rewrite(fpath)
+        if not os.path.islink(fpath):
+            continue
+        target = os.readlink(fpath)
+        # Only fix symlinks pointing to build-machine absolute paths
+        if not os.path.isabs(target):
+            continue
+        if build_prefix and not target.startswith(build_prefix) and not target.startswith('/Users/'):
+            continue
+        # Determine correct target: versioned python or plain python3
+        if 'python3.1' in target:  # python3.11, python3.12, etc.
+            new_target = python_bin_versioned
+        elif 'python3' in target or 'python' in target:
+            new_target = python_bin
+        else:
+            continue
+        if not os.path.exists(new_target):
+            continue
+        os.unlink(fpath)
+        os.symlink(new_target, fpath)
+        print(f'    relinked: bin/{name} -> {new_target}')
+        fixed_symlinks += 1
 
-# 2. pyvenv.cfg
-rewrite(pyvenv_cfg)
-
-# 3. .pth / RECORD / direct_url.json in site-packages
-lib_dir = os.path.join(venv_dir, 'lib')
-if os.path.isdir(lib_dir):
-    for root, _dirs, files in os.walk(lib_dir):
-        for name in files:
-            if name.endswith(('.pth', '.json')) or name == 'RECORD':
-                rewrite(os.path.join(root, name))
+if fixed_symlinks:
+    print(f'    Fixed {fixed_symlinks} symlink(s).')
 
 print('    Done.')
 PYEOF
 
 # ── Verify the venv works ─────────────────────────────────────────────────────
 echo "==> Verifying installation"
-if ! "${VENV_DIR}/bin/python3" -c "import hermes_cli" 2>/dev/null; then
+VERIFY_ERR=$("${VENV_DIR}/bin/python3" -c "import hermes_cli" 2>&1)
+if [[ $? -ne 0 ]]; then
     echo "error: venv verification failed — hermes_cli not importable" >&2
+    echo "  python: ${VENV_DIR}/bin/python3" >&2
+    echo "  error:  ${VERIFY_ERR}" >&2
+    # Print pyvenv.cfg for diagnosis
+    if [[ -f "${VENV_DIR}/pyvenv.cfg" ]]; then
+        echo "  pyvenv.cfg:" >&2
+        cat "${VENV_DIR}/pyvenv.cfg" >&2
+    fi
     exit 1
 fi
 echo "    OK"
