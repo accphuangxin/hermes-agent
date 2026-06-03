@@ -44,13 +44,31 @@ BIN_DIR="/usr/local/bin"
 PBS_VERSION="20260510"
 PBS_PYTHON_VERSION="3.11.15"
 PBS_TARBALL="cpython-${PBS_PYTHON_VERSION}+${PBS_VERSION}-${PBS_PBS_TRIPLE}-install_only.tar.gz"
-PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}/${PBS_TARBALL}"
+
+# Mirror support: set PBS_MIRROR to override the download base URL.
+# Defaults to gh-proxy.com mirror (faster in China).
+# Set PBS_MIRROR=github to force the official GitHub URL.
+_PBS_GITHUB_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}/${PBS_TARBALL}"
+_PBS_GHPROXY_URL="https://gh-proxy.com/github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}/${PBS_TARBALL}"
+
+if [[ "${PBS_MIRROR:-}" == "github" ]]; then
+    PBS_URL="${_PBS_GITHUB_URL}"
+elif [[ -n "${PBS_MIRROR:-}" ]]; then
+    PBS_URL="${PBS_MIRROR}/${PBS_TARBALL}"
+else
+    PBS_URL="${_PBS_GHPROXY_URL}"
+fi
 
 BUILD_DIR="$(pwd)/build/macos-pkg"
 PAYLOAD_DIR="${BUILD_DIR}/payload"
 PKG_COMPONENT="${BUILD_DIR}/hermes-agent-${VERSION}-macos-${ARCH}.pkg"
 DIST_DIR="$(pwd)/dist"
 OUTPUT_PKG="${DIST_DIR}/hermes-agent-${VERSION}-macos-${ARCH}.pkg"
+
+# Persistent cache dir — survives BUILD_DIR cleanup across builds.
+# Override with PBS_CACHE_DIR environment variable.
+PBS_CACHE_DIR="${PBS_CACHE_DIR:-${HOME}/.cache/hermes-build-pbs}"
+mkdir -p "${PBS_CACHE_DIR}"
 
 echo "==> Building hermes-agent ${VERSION} pkg (macos-${ARCH})"
 
@@ -71,9 +89,13 @@ mkdir -p "${PAYLOAD_DIR}${BIN_DIR}"
 mkdir -p "${DIST_DIR}"
 
 # ── Step 1: Download python-build-standalone ──────────────────────────────────
-echo "==> Downloading Python ${PBS_PYTHON_VERSION} (${ARCH})"
-PBS_CACHE="${BUILD_DIR}/${PBS_TARBALL}"
-if [[ ! -f "${PBS_CACHE}" ]]; then
+PBS_CACHE="${PBS_CACHE_DIR}/${PBS_TARBALL}"
+if [[ -f "${PBS_CACHE}" ]]; then
+    echo "==> Python ${PBS_PYTHON_VERSION} (${ARCH}) — using cached tarball"
+    echo "    ${PBS_CACHE}"
+else
+    echo "==> Downloading Python ${PBS_PYTHON_VERSION} (${ARCH})"
+    echo "    from: ${PBS_URL}"
     curl -fL --progress-bar -o "${PBS_CACHE}" "${PBS_URL}"
 fi
 

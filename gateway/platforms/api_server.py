@@ -1101,8 +1101,25 @@ class APIServerAdapter(BasePlatformAdapter):
 
         now = int(time.time())
 
-        def _entry(model_id: str, owner: str) -> Dict[str, Any]:
-            return {
+        # Pre-fetch context lengths for all models
+        def _get_context_length(model_id: str, base_url: str, api_key: str) -> Optional[int]:
+            try:
+                from agent.model_metadata import get_model_context_length
+                return get_model_context_length(
+                    model=model_id,
+                    base_url=base_url,
+                    api_key=api_key,
+                )
+            except Exception:
+                return None
+
+        _model_cfg = user_config.get("model") or {}
+        _primary_base_url = str((_model_cfg.get("base_url") if isinstance(_model_cfg, dict) else None) or "").strip()
+        _primary_api_key = str((_model_cfg.get("api_key") if isinstance(_model_cfg, dict) else None) or "").strip()
+
+        def _entry(model_id: str, owner: str, base_url: str = "", api_key: str = "") -> Dict[str, Any]:
+            ctx = _get_context_length(model_id, base_url, api_key)
+            entry: Dict[str, Any] = {
                 "id": model_id,
                 "object": "model",
                 "created": now,
@@ -1111,8 +1128,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 "root": model_id,
                 "parent": None,
             }
+            if ctx:
+                entry["context_window"] = ctx
+            return entry
 
-        data: List[Dict[str, Any]] = [_entry(primary_model, owned_by)]
+        data: List[Dict[str, Any]] = [_entry(primary_model, owned_by, _primary_base_url, _primary_api_key)]
 
         # Append one entry per custom_providers model so clients can route by
         # provider name (e.g. "CloudCI" or the configured model string).
@@ -1122,9 +1142,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 cp_name = str(cp.get("name") or "").strip()
                 cp_model = str(cp.get("model") or "").strip()
                 cp_owner = str(cp.get("provider_key") or cp.get("name") or "custom").strip()
+                cp_base_url = str(cp.get("base_url") or "").strip()
+                cp_api_key = str(cp.get("api_key") or "").strip()
                 for model_id in filter(None, dict.fromkeys([cp_name, cp_model])):
                     if model_id not in seen_ids:
-                        data.append(_entry(model_id, cp_owner))
+                        data.append(_entry(model_id, cp_owner, cp_base_url, cp_api_key))
                         seen_ids.add(model_id)
         except Exception:
             pass
