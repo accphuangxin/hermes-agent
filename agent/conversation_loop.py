@@ -655,7 +655,22 @@ def run_conversation(
                     task_id=effective_task_id,
                 )
                 if len(messages) >= _orig_len:
-                    break  # Cannot compress further
+                    # Text summarisation made no progress. Try shrinking base64
+                    # images before giving up — large images are invisible to
+                    # the text compressor but may free enough space to proceed.
+                    if agent._try_shrink_image_parts_in_messages(messages):
+                        logger.info(
+                            "%sPreflight compression: text summarisation exhausted; "
+                            "shrank image parts in history.",
+                            agent.log_prefix,
+                        )
+                        agent._buffer_status("🗜️ Shrinking images in history to recover context space...")
+                        _preflight_tokens = estimate_request_tokens_rough(
+                            messages,
+                            system_prompt=active_system_prompt or "",
+                            tools=agent.tools or None,
+                        )
+                    break  # Cannot compress further (with or without image shrink)
                 # Compression created a new session — clear the history
                 # reference so _flush_messages_to_session_db writes ALL
                 # compressed messages to the new session's SQLite, not
@@ -3003,6 +3018,21 @@ def run_conversation(
                         restart_with_compressed_messages = True
                         break
                     else:
+                        # Text compression made no progress. Try shrinking base64
+                        # image parts — a single large image can exceed the context
+                        # limit on its own, which text summarisation cannot fix.
+                        _img_shrunk = agent._try_shrink_image_parts_in_messages(messages)
+                        if _img_shrunk:
+                            logger.info(
+                                "%sContext compression: text summarisation exhausted; "
+                                "shrank image parts in history, retrying.",
+                                agent.log_prefix,
+                            )
+                            agent._buffer_status("🗜️ Shrinking images in history to recover context space, retrying...")
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
+
                         # Can't compress further and already at minimum tier
                         agent._flush_status_buffer()
                         agent._vprint(f"{agent.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)

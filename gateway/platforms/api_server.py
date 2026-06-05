@@ -8,6 +8,7 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
 - GET  /v1/capabilities            — machine-readable API capabilities for external UIs
+- GET  /api/agents                 — list all hermes profiles (each profile = one agent)
 - GET  /api/sessions               — list client-visible Hermes sessions
 - POST /api/sessions               — create an empty Hermes session
 - GET/PATCH/DELETE /api/sessions/{session_id} — read/update/delete a session
@@ -1101,7 +1102,6 @@ class APIServerAdapter(BasePlatformAdapter):
 
         now = int(time.time())
 
-        # Pre-fetch context lengths for all models
         def _get_context_length(model_id: str, base_url: str, api_key: str) -> Optional[int]:
             try:
                 from agent.model_metadata import get_model_context_length
@@ -1112,6 +1112,34 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             except Exception:
                 return None
+
+        def _get_supports_vision(owner: str, model_id: str) -> bool:
+            try:
+                from agent.image_routing import decide_image_input_mode
+                # custom_providers is a list; _supports_vision_override only reads
+                # cfg["providers"] (a dict). Promote matching custom_providers entry
+                # into a temporary cfg["providers"] dict so the lookup works.
+                _cfg = user_config
+                _custom = _cfg.get("custom_providers") or []
+                if isinstance(_custom, list):
+                    for _cp in _custom:
+                        if not isinstance(_cp, dict):
+                            continue
+                        if str(_cp.get("name") or "").strip() == owner:
+                            _cp_models = _cp.get("models")
+                            if isinstance(_cp_models, dict) and model_id in _cp_models:
+                                _m = _cp_models[model_id]
+                                if isinstance(_m, dict) and "supports_vision" in _m:
+                                    sv = _m["supports_vision"]
+                                    if isinstance(sv, bool):
+                                        return sv
+                                    if isinstance(sv, str):
+                                        return sv.lower() in ("true", "1", "yes")
+                mode = decide_image_input_mode(owner, model_id, _cfg)
+                return mode == "native"
+            except Exception as _e:
+                logger.debug("v1/models: supports_vision lookup failed for %s/%s: %s", owner, model_id, _e)
+                return False
 
         _model_cfg = user_config.get("model") or {}
         _primary_base_url = str((_model_cfg.get("base_url") if isinstance(_model_cfg, dict) else None) or "").strip()
@@ -1127,25 +1155,35 @@ class APIServerAdapter(BasePlatformAdapter):
                 "permission": [],
                 "root": model_id,
                 "parent": None,
+                "supports_vision": _get_supports_vision(owner, model_id),
             }
             if ctx:
                 entry["context_window"] = ctx
             return entry
 
-        data: List[Dict[str, Any]] = [_entry(primary_model, owned_by, _primary_base_url, _primary_api_key)]
+        data: List[Dict[str, Any]] = []
+        seen_ids: set = set()
 
-        # Append one entry per custom_providers model so clients can route by
-        # provider name (e.g. "CloudCI" or the configured model string).
-        seen_ids: set = {primary_model}
+        # Always include the primary model first
+        if primary_model:
+            data.append(_entry(primary_model, owned_by, _primary_base_url, _primary_api_key))
+            seen_ids.add(primary_model)
+
+        # Additional models from custom_providers
         try:
             for cp in get_compatible_custom_providers(user_config):
-                cp_name = str(cp.get("name") or "").strip()
-                cp_model = str(cp.get("model") or "").strip()
-                cp_owner = str(cp.get("provider_key") or cp.get("name") or "custom").strip()
+                cp_owner = str(cp.get("name") or cp.get("provider_key") or "custom").strip()
                 cp_base_url = str(cp.get("base_url") or "").strip()
                 cp_api_key = str(cp.get("api_key") or "").strip()
-                for model_id in filter(None, dict.fromkeys([cp_name, cp_model])):
-                    if model_id not in seen_ids:
+                cp_models_dict = cp.get("models") or {}
+                cp_model = str(cp.get("model") or "").strip()
+
+                model_ids = list(cp_models_dict.keys()) if cp_models_dict else []
+                if not model_ids and cp_model:
+                    model_ids = [cp_model]
+
+                for model_id in model_ids:
+                    if model_id and model_id not in seen_ids:
                         data.append(_entry(model_id, cp_owner, cp_base_url, cp_api_key))
                         seen_ids.add(model_id)
         except Exception:
@@ -1319,6 +1357,87 @@ class APIServerAdapter(BasePlatformAdapter):
             "platform": "api_server",
             "data": data,
         })
+
+    # ------------------------------------------------------------------
+    # /api/agents — list all hermes profiles (each profile = one agent)
+    # ------------------------------------------------------------------
+
+    async def _handle_agents(self, request: "web.Request") -> "web.Response":
+        """GET /api/agents — list all hermes profiles as agent descriptors.
+
+        Each profile is an independent agent instance with its own model,
+        gateway state, skills, and memory. This endpoint surfaces the same
+        information shown by ``hermes profile list`` as a JSON payload.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from hermes_cli.profiles import list_profiles
+            # list_profiles() is synchronous and does blocking I/O (file locks,
+            # yaml parsing, skill directory traversal). Run it in a thread pool
+            # so it doesn't stall the aiohttp event loop — critical when other
+            # platforms (e.g. Weixin) share the same loop and hold file locks.
+            loop = asyncio.get_event_loop()
+            profiles = await loop.run_in_executor(None, list_profiles)
+        except Exception:
+            logger.exception("GET /api/agents failed")
+            return web.json_response(
+                _openai_error("Failed to enumerate agents", err_type="server_error"),
+                status=500,
+            )
+
+        def _read_api_server_config(profile_dir: Any) -> tuple:
+            """Return (port, key) from a profile's config.yaml api_server block.
+
+            Checks extra.port / extra.key first (correct placement), then
+            falls back to top-level port / key for configs written before the
+            extra-nesting requirement was enforced.
+            """
+            try:
+                import yaml
+                from pathlib import Path as _Path
+                config_path = _Path(profile_dir) / "config.yaml"
+                if not config_path.exists():
+                    return None, None
+                cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                api_cfg = cfg.get("platforms", {}).get("api_server", {})
+                extra = api_cfg.get("extra", {})
+                port = extra.get("port") or api_cfg.get("port")
+                key = extra.get("key") or api_cfg.get("key")
+                return (int(port) if port is not None else None), (str(key) if key else None)
+            except Exception:
+                return None, None
+
+        data = []
+        for p in profiles:
+            entry: Dict[str, Any] = {
+                "id": p.name,
+                "object": "agent",
+                "isDefault": p.is_default,
+                "model": p.model,
+                "provider": p.provider,
+                "gatewayRunning": p.gateway_running,
+                "skillCount": p.skill_count,
+                "description": p.description,
+            }
+            api_port, api_key = _read_api_server_config(p.path)
+            if api_port is not None:
+                entry["apiServerPort"] = api_port
+            if api_key is not None:
+                entry["apiServerKey"] = api_key
+            if p.alias_path:
+                entry["alias"] = p.alias_path.name
+            if p.distribution_name:
+                entry["distribution"] = {
+                    "name": p.distribution_name,
+                    "version": p.distribution_version,
+                    "source": p.distribution_source,
+                }
+            data.append(entry)
+
+        return web.json_response({"object": "list", "data": data})
 
     # ------------------------------------------------------------------
     # /api/sessions — thin client/session resource API
@@ -3668,19 +3787,221 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("Invalid JSON"), status=400)
 
         raw_input = body.get("input")
-        if not raw_input:
+        raw_messages = body.get("messages")  # Chat Completions-style multimodal messages
+        # attachments: list of local file paths or http(s) URLs sent by the client.
+        # Processed after user_message is resolved; routing (native vs text) is
+        # decided per-turn based on the active model's vision capability.
+        raw_attachments: List[str] = body.get("attachments") or []
+        if isinstance(raw_attachments, str):
+            raw_attachments = [raw_attachments]
+
+        if not raw_input and not raw_messages:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
 
-        user_message = raw_input if isinstance(raw_input, str) else (raw_input[-1].get("content", "") if isinstance(raw_input, list) else "")
-        if not user_message:
+        # ── Step 1: resolve plain user_message text and implicit history ──────
+        # When a Chat Completions-style `messages` array is present it takes
+        # precedence over `input` for extracting user_message and history.
+        _messages_history: List[Dict] = []
+        if isinstance(raw_messages, list) and raw_messages:
+            for idx, msg in enumerate(raw_messages):
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get("role", "")
+                if role not in {"user", "assistant", "system"}:
+                    continue
+                try:
+                    content = _normalize_multimodal_content(msg.get("content", ""))
+                except ValueError as exc:
+                    return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
+                _messages_history.append({"role": role, "content": content})
+
+            if _messages_history:
+                last = _messages_history[-1]
+                user_message = last["content"]
+                _messages_history = _messages_history[:-1]
+            else:
+                user_message = raw_input or ""
+        else:
+            # raw_input can be:
+            #   1. str — plain text message
+            #   2. list of message objects — [{"role": "user", "content": "..."}, ...]
+            #   3. list of content parts — [{"type": "text", ...}, {"type": "image_url", ...}]
+            # Distinguish (2) from (3): message objects have "role"; content parts have "type".
+            if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], dict) and "type" in raw_input[0] and "role" not in raw_input[0]:
+                try:
+                    user_message = _normalize_multimodal_content(raw_input)
+                except ValueError as exc:
+                    return _multimodal_validation_error(exc, param="input")
+            elif isinstance(raw_input, list):
+                last_msg = raw_input[-1] if raw_input else {}
+                raw_content = last_msg.get("content", "") if isinstance(last_msg, dict) else ""
+                try:
+                    user_message = _normalize_multimodal_content(raw_content)
+                except ValueError as exc:
+                    return _multimodal_validation_error(exc, param="input")
+            else:
+                user_message = raw_input or ""
+
+        if not _content_has_visible_payload(user_message):
             return web.json_response(_openai_error("No user message found in input"), status=400)
+
+        # ── Step 2: image routing ─────────────────────────────────────────────
+        # Collect image references from two sources:
+        #   A. `attachments` field — local file paths or http(s) URLs
+        #   B. image_url parts already embedded in user_message (from `messages`)
+        #
+        # Routing decision (mirrors tui_gateway):
+        #   native → pass as OpenAI-style content parts; provider adapters convert
+        #   text   → pre-analyse with vision_analyze, prepend description as text
+        def _extract_image_parts_from_content(content: Any) -> List[Dict]:
+            if not isinstance(content, list):
+                return []
+            return [p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
+
+        def _extract_text_from_content(content: Any) -> str:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            return str(content) if content else ""
+
+        # Separate already-inline image parts from the text portion of user_message
+        inline_image_parts = _extract_image_parts_from_content(user_message)
+        user_text_only = _extract_text_from_content(user_message) if isinstance(user_message, list) else (user_message or "")
+
+        # Classify attachments into local paths and remote URLs
+        import os as _os
+        attachment_paths: List[str] = []
+        attachment_urls: List[str] = []
+        for att in raw_attachments:
+            att = (att or "").strip()
+            if not att:
+                continue
+            low = att.lower()
+            if low.startswith("http://") or low.startswith("https://"):
+                attachment_urls.append(att)
+            else:
+                # Treat as local file path
+                expanded = _os.path.expanduser(att)
+                attachment_paths.append(expanded)
+
+        has_attachments = bool(attachment_paths or attachment_urls or inline_image_parts)
+
+        if has_attachments:
+            # Mirror TUI/CLI routing: use decide_image_input_mode() to choose between
+            # native (OpenAI-style content parts) and text (vision_analyze pre-analysis)
+            # based on the active model's vision capability and config overrides.
+            try:
+                from agent.image_routing import (
+                    build_native_content_parts,
+                    decide_image_input_mode,
+                )
+                from gateway.run import _load_gateway_config, _resolve_gateway_model, _resolve_runtime_agent_kwargs
+
+                _user_config = _load_gateway_config()
+                _runtime_kw = _resolve_runtime_agent_kwargs()
+                _active_provider = str(_runtime_kw.get("provider") or "").strip()
+                _active_model = str(body.get("model") or _resolve_gateway_model() or "").strip()
+                _img_mode = decide_image_input_mode(_active_provider, _active_model, _user_config)
+            except Exception as _img_exc:
+                logger.debug("[v1/runs] image_routing decision failed, defaulting to native: %s", _img_exc)
+                _img_mode = "native"
+
+            if _img_mode == "native":
+                if attachment_paths or attachment_urls:
+                    try:
+                        _parts, _skipped = build_native_content_parts(
+                            user_text_only,
+                            attachment_paths,
+                            image_urls=attachment_urls,
+                        )
+                        if inline_image_parts:
+                            _parts = _parts + inline_image_parts
+                        user_message = _parts
+                        if _skipped:
+                            logger.warning("[v1/runs] skipped %d unreadable attachment(s): %s", len(_skipped), _skipped)
+                    except Exception as _e:
+                        logger.warning("[v1/runs] build_native_content_parts failed: %s", _e)
+                        # Fall back: keep user_message as-is (inline parts already in content list)
+                # inline_image_parts only (from messages field): user_message is already correct
+            else:
+                # text mode: pre-analyse each image via vision_analyze and prepend descriptions
+                import asyncio as _asyncio
+                import json as _json
+                from tools.vision_tools import vision_analyze_tool
+
+                _analysis_prompt = (
+                    "Describe everything visible in this image in thorough detail. "
+                    "Include any text, code, data, objects, people, layout, colors, "
+                    "and any other notable visual information."
+                )
+                _enriched: List[str] = []
+
+                for _img_path_str in attachment_paths:
+                    _img_p = Path(_img_path_str)
+                    if not _img_p.exists():
+                        continue
+                    try:
+                        _result_json = await vision_analyze_tool(
+                            image_url=str(_img_p), user_prompt=_analysis_prompt
+                        )
+                        _result = _json.loads(_result_json)
+                        if _result.get("success"):
+                            _enriched.append(
+                                f"[The user attached an image. Here's what it contains:\n{_result.get('analysis', '')}]\n"
+                                f"[If you need a closer look, use vision_analyze with image_url: {_img_p}]"
+                            )
+                        else:
+                            _enriched.append(
+                                f"[The user attached an image but it couldn't be analyzed. "
+                                f"You can try examining it with vision_analyze using image_url: {_img_p}]"
+                            )
+                        logger.debug("[v1/runs] vision pre-analyzed: %s", _img_p.name)
+                    except Exception as _ve:
+                        logger.warning("[v1/runs] vision_analyze failed for %s: %s", _img_p.name, _ve)
+                        _enriched.append(
+                            f"[The user attached an image but analysis failed ({_ve}). "
+                            f"You can try examining it with vision_analyze using image_url: {_img_path_str}]"
+                        )
+
+                for _img_url in attachment_urls:
+                    try:
+                        _result_json = await vision_analyze_tool(
+                            image_url=_img_url, user_prompt=_analysis_prompt
+                        )
+                        _result = _json.loads(_result_json)
+                        if _result.get("success"):
+                            _enriched.append(
+                                f"[The user attached an image. Here's what it contains:\n{_result.get('analysis', '')}]\n"
+                                f"[If you need a closer look, use vision_analyze with image_url: {_img_url}]"
+                            )
+                        else:
+                            _enriched.append(
+                                f"[The user attached an image but it couldn't be analyzed. "
+                                f"You can try examining it with vision_analyze using image_url: {_img_url}]"
+                            )
+                    except Exception as _ve:
+                        logger.warning("[v1/runs] vision_analyze failed for URL %s: %s", _img_url, _ve)
+                        _enriched.append(
+                            f"[The user attached an image but analysis failed ({_ve}). "
+                            f"You can try examining it with vision_analyze using image_url: {_img_url}]"
+                        )
+
+                if _enriched:
+                    _prefix = "\n\n".join(_enriched)
+                    user_message = f"{_prefix}\n\n{user_text_only}" if user_text_only else _prefix
+                # inline_image_parts from messages field are dropped in text mode
+                # (the model doesn't have vision capability, so pixels are useless)
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
 
         # Accept explicit conversation_history from the request body.
-        # Precedence: explicit conversation_history > previous_response_id.
-        conversation_history: List[Dict[str, str]] = []
+        # Precedence: explicit conversation_history > messages-derived history > previous_response_id.
+        conversation_history: List[Dict] = list(_messages_history) if _messages_history else []
         raw_history = body.get("conversation_history")
         if raw_history:
             if not isinstance(raw_history, list):
@@ -4189,6 +4510,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
+            self._app.router.add_get("/api/agents", self._handle_agents)
             # Session/client control surface (thin wrappers over SessionDB + _run_agent)
             self._app.router.add_get("/api/sessions", self._handle_list_sessions)
             self._app.router.add_post("/api/sessions", self._handle_create_session)

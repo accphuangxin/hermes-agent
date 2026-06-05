@@ -1767,9 +1767,50 @@ def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     return ((total_chars + 3) // 4) + image_tokens
 
 
+def _image_part_tokens(part: Dict[str, Any], fallback: int) -> int:
+    """Estimate tokens for a single image content part.
+
+    For base64-encoded images the token count is derived from the raw byte
+    size (base64_len * 3/4 / 750, matching Anthropic's ~750 bytes-per-token
+    image pricing).  Remote URLs and unreadable parts fall back to *fallback*.
+
+    Supports both OpenAI-style image_url parts and Anthropic-style image
+    blocks (source.type == "base64").
+    """
+    _BYTES_PER_TOKEN = 750
+
+    # OpenAI format: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    if part.get("type") in {"image_url", "input_image"}:
+        url_val = part.get("image_url", {})
+        url = url_val.get("url", "") if isinstance(url_val, dict) else str(url_val or "")
+        if url.startswith("data:") and ";base64," in url:
+            b64_data = url.split(";base64,", 1)[1]
+            raw_bytes = len(b64_data) * 3 // 4
+            return max(1, raw_bytes // _BYTES_PER_TOKEN)
+        return fallback
+
+    # Anthropic format: {"type": "image", "source": {"type": "base64", "data": "..."}}
+    if part.get("type") == "image":
+        source = part.get("source") or {}
+        if isinstance(source, dict) and source.get("type") == "base64":
+            b64_data = source.get("data", "")
+            if b64_data:
+                raw_bytes = len(b64_data) * 3 // 4
+                return max(1, raw_bytes // _BYTES_PER_TOKEN)
+        return fallback
+
+    return fallback
+
+
 def _count_image_tokens(msg: Dict[str, Any], cost_per_image: int) -> int:
-    """Count image-like content parts in a message; return their token cost."""
-    count = 0
+    """Count image-like content parts in a message; return their token cost.
+
+    For base64-encoded images the cost is computed from the actual byte size
+    rather than the flat *cost_per_image* fallback — a 255 KB PNG is ~340 KB
+    of base64 which costs ~450 tokens, not 1500.  The flat fallback is still
+    used for remote URLs and for any part whose data cannot be inspected.
+    """
+    total = 0
     content = msg.get("content") if isinstance(msg, dict) else None
     if isinstance(content, list):
         for part in content:
@@ -1777,20 +1818,20 @@ def _count_image_tokens(msg: Dict[str, Any], cost_per_image: int) -> int:
                 continue
             ptype = part.get("type")
             if ptype in {"image", "image_url", "input_image"}:
-                count += 1
+                total += _image_part_tokens(part, cost_per_image)
     stashed = msg.get("_anthropic_content_blocks") if isinstance(msg, dict) else None
     if isinstance(stashed, list):
         for part in stashed:
             if isinstance(part, dict) and part.get("type") == "image":
-                count += 1
+                total += _image_part_tokens(part, cost_per_image)
     # Multimodal tool results that haven't been converted yet.
     if isinstance(content, dict) and content.get("_multimodal"):
         inner = content.get("content")
         if isinstance(inner, list):
             for part in inner:
                 if isinstance(part, dict) and part.get("type") in {"image", "image_url"}:
-                    count += 1
-    return count * cost_per_image
+                    total += _image_part_tokens(part, cost_per_image)
+    return total
 
 
 def _estimate_message_chars(msg: Dict[str, Any]) -> int:
