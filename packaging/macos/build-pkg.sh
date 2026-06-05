@@ -139,7 +139,7 @@ VENV_PIP="${PAYLOAD_DIR}${INSTALL_PREFIX}/venv/bin/pip"
 # Heavy optional backends (anthropic, voice, messaging, modal, etc.) are
 # intentionally excluded — they lazy-install at first use via lazy_deps.py.
 "${VENV_PIP}" install --quiet \
-    "${SDIST_BUILT}[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms,anthropic]"
+    "${SDIST_BUILT}[cli,pty,mcp,acp,google,youtube,web,homeassistant,sms,anthropic,bedrock]"
 "${VENV_PIP}" install --quiet "qrcode==7.4.2"
 
 # ── Step 3: Write launcher scripts into payload ───────────────────────────────
@@ -170,6 +170,10 @@ chmod +x "${PAYLOAD_DIR}${BIN_DIR}/hermes-agent"
 printf '%s\nexec "${HERMES_HOME}/venv/bin/hermes-acp" "$@"\n' "${LAUNCHER_PREAMBLE}" \
     > "${PAYLOAD_DIR}${BIN_DIR}/hermes-acp"
 chmod +x "${PAYLOAD_DIR}${BIN_DIR}/hermes-acp"
+
+printf '%s\nexec "${HERMES_HOME}/venv/bin/hermes-agent-manager" "$@"\n' "${LAUNCHER_PREAMBLE}" \
+    > "${PAYLOAD_DIR}${BIN_DIR}/hermes-agent-manager"
+chmod +x "${PAYLOAD_DIR}${BIN_DIR}/hermes-agent-manager"
 
 # ── Step 4: Build component pkg ───────────────────────────────────────────────
 echo "==> Building component package"

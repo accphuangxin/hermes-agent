@@ -77,6 +77,7 @@ Authorization: Bearer <api-key>
 | `GET` | `/v1/agents/{id}` | 获取单个 Agent 详情 |
 | `PATCH` | `/v1/agents/{id}` | 更新 Agent 配置 |
 | `DELETE` | `/v1/agents/{id}` | 删除 Agent（删除 hermes profile） |
+| `POST` | `/v1/agents/restart-all` | 并行重启所有 Agent 的 gateway |
 | `POST` | `/v1/agents/{id}/start` | 启动 Agent gateway |
 | `POST` | `/v1/agents/{id}/stop` | 停止 Agent gateway |
 | `POST` | `/v1/agents/{id}/restart` | 重启 Agent gateway |
@@ -427,6 +428,57 @@ curl -X POST http://localhost:8640/v1/agents/hermes-profile-customer-service/res
 
 ---
 
+## POST /v1/agents/restart-all
+
+并行重启所有 manager 管理的 Agent 的 gateway。单个 Agent 失败不影响其余 Agent 的重启流程。
+
+```bash
+curl -X POST http://localhost:8640/v1/agents/restart-all \
+  -H "Authorization: Bearer <api-key>"
+```
+
+**响应示例**（200 OK）
+
+```json
+{
+  "agents": [
+    {
+      "id": "hermes-profile-default",
+      "name": "default",
+      "status": "running",
+      "actual_port": 8643
+    },
+    {
+      "id": "hermes-profile-customer-service",
+      "name": "customer-service",
+      "status": "running",
+      "actual_port": 8701
+    }
+  ],
+  "total": 2
+}
+```
+
+重启失败的 Agent 会在其对象中附加 `restartError` 字段：
+
+```json
+{
+  "agents": [
+    {
+      "id": "hermes-profile-customer-service",
+      "name": "customer-service",
+      "status": "stopped",
+      "restartError": "gateway start timed out"
+    }
+  ],
+  "total": 1
+}
+```
+
+> **注意：** 此接口始终返回 200，即使部分 Agent 重启失败。通过响应体中各 Agent 是否含 `restartError` 字段来判断个别失败情况。
+
+---
+
 ## GET /v1/agents/{id}/status
 
 获取 Agent 运行时状态快照（轻量接口）。
@@ -526,10 +578,13 @@ curl -X POST http://localhost:8701/v1/chat/completions \
 customer-service gateway status
 customer-service chat -q "今天物流怎么样"
 
-# 6. 停止 / 启动 / 重启
+# 6. 停止 / 启动 / 重启单个 Agent
 curl -X POST $BASE/v1/agents/hermes-profile-customer-service/stop
 curl -X POST $BASE/v1/agents/hermes-profile-customer-service/start
 curl -X POST $BASE/v1/agents/hermes-profile-customer-service/restart
+
+# 6b. 并行重启所有 Agent（配置变更后批量生效）
+curl -X POST $BASE/v1/agents/restart-all | python3 -m json.tool
 
 # 7. 删除 Agent（同时清理 profile 目录、别名、服务）
 curl -X DELETE $BASE/v1/agents/hermes-profile-customer-service

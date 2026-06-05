@@ -7,6 +7,7 @@ Runs on a dedicated port (default 8640) as a fully independent
 aiohttp instance, completely separate from the per-agent servers.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -434,6 +435,7 @@ class ControlServer:
         r.add_get ("/v1/agents/{id}",           self._handle_get)
         r.add_patch("/v1/agents/{id}",          self._handle_update)
         r.add_delete("/v1/agents/{id}",         self._handle_delete)
+        r.add_post("/v1/agents/restart-all",     self._handle_restart_all)
         r.add_post("/v1/agents/{id}/start",     self._handle_start)
         r.add_post("/v1/agents/{id}/stop",      self._handle_stop)
         r.add_post("/v1/agents/{id}/restart",   self._handle_restart)
@@ -747,6 +749,22 @@ class ControlServer:
         except Exception as exc:
             return _error(str(exc), status=500)
         return _json_response(instance.to_dict())
+
+    async def _handle_restart_all(self, request: "web.Request") -> "web.Response":
+        instances = self._manager.list_instances()
+        results = await asyncio.gather(
+            *[self._manager.restart_agent(i.config.id) for i in instances],
+            return_exceptions=True,
+        )
+        agents = []
+        for instance, result in zip(instances, results):
+            if isinstance(result, Exception):
+                d = instance.to_dict()
+                d["restartError"] = str(result)
+                agents.append(d)
+            else:
+                agents.append(result.to_dict())
+        return _json_response({"agents": agents, "total": len(agents)})
 
     async def _handle_status(self, request: "web.Request") -> "web.Response":
         agent_id = request.match_info["id"]
