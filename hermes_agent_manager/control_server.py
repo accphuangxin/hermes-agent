@@ -195,21 +195,45 @@ def _install_and_start_gateway(profile_name: str) -> None:
     env = os.environ.copy()
     env["HERMES_HOME"] = profile_home
 
-    # install 注册服务（launchd/systemd），后台 start 确保立即启动
-    result = subprocess.run(
-        [hermes_bin, "gateway", "install"],
-        env=env, capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        logger.warning(
-            "gateway install for %r exited %d: %s",
-            profile_name, result.returncode,
-            result.stderr.strip() or result.stdout.strip(),
-        )
-    else:
-        logger.info("Gateway installed for profile %r", profile_name)
+    # Check if the launchd plist for this profile already exists and is current.
+    # If so, skip `gateway install` entirely — install rewrites the plist and
+    # triggers a bootout/bootstrap cycle which sends SIGTERM to the running
+    # process.  For a brand-new profile the plist won't exist yet, so install
+    # is required.  For an existing profile, `gateway start` is sufficient.
+    import sys as _sys
+    from pathlib import Path as _P
 
-    # install 完成后显式触发 start（后台，不阻塞）
+    def _profile_plist_exists() -> bool:
+        launch_agents = _P.home() / "Library" / "LaunchAgents"
+        # Match both named (ai.hermes.gateway-{name}.plist) and default plist
+        for plist in launch_agents.glob("ai.hermes.gateway*.plist"):
+            try:
+                content = plist.read_text(encoding="utf-8")
+                if profile_home in content:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    needs_install = not _profile_plist_exists()
+
+    if needs_install:
+        result = subprocess.run(
+            [hermes_bin, "gateway", "install"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "gateway install for %r exited %d: %s",
+                profile_name, result.returncode,
+                result.stderr.strip() or result.stdout.strip(),
+            )
+        else:
+            logger.info("Gateway installed for profile %r", profile_name)
+    else:
+        logger.info("Gateway plist already exists for profile %r, skipping install", profile_name)
+
+    # start 触发启动（后台，不阻塞），不管 install 是否执行
     subprocess.Popen(
         [hermes_bin, "gateway", "start"],
         env=env,
@@ -476,9 +500,20 @@ class ControlServer:
         except Exception:
             return _error("Invalid JSON body")
 
-        name = (body.get("name") or "").strip()
+        name = (body.get("name") or "").strip().lower()
         if not name:
             return _error("'name' is required")
+        # Profile names must be lowercase to match _profile_suffix() regex
+        # (^[a-z0-9][a-z0-9_-]{0,63}$). Uppercase names fall through to a
+        # hash-based plist label (e.g. ai.hermes.gateway-885b3b03.plist) which
+        # can't be cleaned up by the GC loop and causes launchd to keep
+        # restarting a deleted profile, triggering SIGTERM on the default gateway.
+        import re as _re
+        if not _re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", name):
+            return _error(
+                "Profile name must start with a letter or digit and contain only "
+                "lowercase letters, digits, hyphens, or underscores (max 64 chars)"
+            )
 
         clone       = bool(body.get("clone", True))
         clone_from  = body.get("clone_from") or None
