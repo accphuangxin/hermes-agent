@@ -148,20 +148,73 @@ def _list_hermes_profile_agents() -> list:
     return result
 
 
-def _restart_profile_gateway(profile_name: str) -> None:
-    """重启指定 profile 的 gateway 服务（后台执行，不阻塞）。"""
-    import os, subprocess
+def _profile_env(profile_name: str) -> tuple[str, dict]:
+    """Return (hermes_bin, env) for running hermes commands against a profile.
+
+    IMPORTANT: must NOT use /usr/local/bin/hermes — that launcher bash script
+    hard-codes ``HERMES_HOME="/usr/local/hermes"``, overwriting the env var we
+    set here before the Python process even starts.  Use the venv's hermes
+    entry-point directly so HERMES_HOME propagates correctly.
+    """
+    import os, subprocess, sys
+    from pathlib import Path as _P
     real_home = _real_hermes_home()
     profile_home = str(real_home) if profile_name == "default" else str(real_home / "profiles" / profile_name)
 
-    hermes_bin = subprocess.run(
-        ["which", "hermes"], capture_output=True, text=True
-    ).stdout.strip() or "hermes"
+    # Prefer the venv hermes (Python shim, honours HERMES_HOME) over the
+    # pkg-installed shell wrapper which hard-codes HERMES_HOME=/usr/local/hermes.
+    venv_bin = _P(sys.executable).parent  # e.g. /usr/local/hermes/venv/bin
+    venv_hermes = venv_bin / "hermes"
+    if venv_hermes.exists():
+        hermes_bin = str(venv_hermes)
+    else:
+        # Fallback: shell wrapper — caller must be aware HERMES_HOME may be clobbered
+        hermes_bin = subprocess.run(
+            ["which", "hermes"], capture_output=True, text=True
+        ).stdout.strip() or "hermes"
 
     env = os.environ.copy()
     env["HERMES_HOME"] = profile_home
+    return hermes_bin, env
 
-    # 后台启动，不等待，避免阻塞事件循环（gateway restart 需要等旧进程退出）
+
+def _stop_profile_gateway(profile_name: str) -> None:
+    """停止指定 profile 的 gateway 服务（同步等待，最多 30s）。"""
+    import subprocess
+    hermes_bin, env = _profile_env(profile_name)
+    result = subprocess.run(
+        [hermes_bin, "gateway", "stop"],
+        env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "gateway stop for %r exited %d: %s",
+            profile_name, result.returncode,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+    else:
+        logger.info("Gateway stopped for profile %r", profile_name)
+
+
+def _start_profile_gateway(profile_name: str) -> None:
+    """启动指定 profile 的 gateway 服务（后台执行，不阻塞）。"""
+    import subprocess
+    hermes_bin, env = _profile_env(profile_name)
+    subprocess.Popen(
+        [hermes_bin, "gateway", "start"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    logger.info("Gateway start triggered for profile %r (background)", profile_name)
+
+
+def _restart_profile_gateway(profile_name: str) -> None:
+    """重启指定 profile 的 gateway 服务（后台执行，不阻塞）。"""
+    import subprocess
+    hermes_bin, env = _profile_env(profile_name)
     subprocess.Popen(
         [hermes_bin, "gateway", "restart"],
         env=env,
@@ -178,31 +231,22 @@ def _install_and_start_gateway(profile_name: str) -> None:
     等价于：hermes -p {profile_name} gateway install && start
     通过设置 HERMES_HOME 切换 profile 上下文后调用现有 gateway 函数。
     """
-    import os, platform, subprocess, sys
-    real_home = _real_hermes_home()
+    import subprocess
+    from pathlib import Path as _P
 
-    # 计算该 profile 的 HERMES_HOME
-    if profile_name == "default":
-        profile_home = str(real_home)
-    else:
-        profile_home = str(real_home / "profiles" / profile_name)
-
-    # 用子进程执行，完全隔离环境变量，避免污染当前进程
-    hermes_bin = subprocess.run(
-        ["which", "hermes"], capture_output=True, text=True
-    ).stdout.strip() or "hermes"
-
-    env = os.environ.copy()
-    env["HERMES_HOME"] = profile_home
+    # 必须用 _profile_env() 而非 `which hermes`：
+    # /usr/local/bin/hermes 是 bash wrapper，它在启动时硬编码覆盖
+    # HERMES_HOME=/usr/local/hermes，导致 gateway install 作用于 default
+    # profile 而非目标 profile，触发 bootout/bootstrap 循环给 default
+    # gateway 发 SIGTERM。
+    hermes_bin, env = _profile_env(profile_name)
+    profile_home = env["HERMES_HOME"]
 
     # Check if the launchd plist for this profile already exists and is current.
     # If so, skip `gateway install` entirely — install rewrites the plist and
     # triggers a bootout/bootstrap cycle which sends SIGTERM to the running
     # process.  For a brand-new profile the plist won't exist yet, so install
     # is required.  For an existing profile, `gateway start` is sufficient.
-    import sys as _sys
-    from pathlib import Path as _P
-
     def _profile_plist_exists() -> bool:
         launch_agents = _P.home() / "Library" / "LaunchAgents"
         # Match both named (ai.hermes.gateway-{name}.plist) and default plist
@@ -754,6 +798,8 @@ class ControlServer:
 
     async def _handle_start(self, request: "web.Request") -> "web.Response":
         agent_id = request.match_info["id"]
+        if agent_id.startswith("hermes-profile-"):
+            return await self._start_profile_agent(agent_id)
         try:
             instance = await self._manager.start_agent(agent_id)
         except KeyError:
@@ -766,6 +812,8 @@ class ControlServer:
 
     async def _handle_stop(self, request: "web.Request") -> "web.Response":
         agent_id = request.match_info["id"]
+        if agent_id.startswith("hermes-profile-"):
+            return await self._stop_profile_agent(agent_id)
         try:
             await self._manager.stop_agent(agent_id)
         except KeyError:
@@ -777,6 +825,8 @@ class ControlServer:
 
     async def _handle_restart(self, request: "web.Request") -> "web.Response":
         agent_id = request.match_info["id"]
+        if agent_id.startswith("hermes-profile-"):
+            return await self._restart_profile_agent(agent_id)
         try:
             instance = await self._manager.restart_agent(agent_id)
         except KeyError:
@@ -784,6 +834,63 @@ class ControlServer:
         except Exception as exc:
             return _error(str(exc), status=500)
         return _json_response(instance.to_dict())
+
+    # ------------------------------------------------------------------
+    # Profile agent lifecycle helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_profile_dir(self, agent_id: str):
+        """Return (name, profile_dir) for a hermes-profile-* agent_id, or None if not found."""
+        from pathlib import Path as _P
+        name = agent_id.removeprefix("hermes-profile-")
+        real_home = _real_hermes_home()
+        profile_dir = real_home if name == "default" else real_home / "profiles" / name
+        if not (profile_dir / "config.yaml").exists():
+            return None, None
+        return name, profile_dir
+
+    async def _start_profile_agent(self, agent_id: str) -> "web.Response":
+        name, profile_dir = self._resolve_profile_dir(agent_id)
+        if profile_dir is None:
+            return _error(f"Profile '{agent_id.removeprefix('hermes-profile-')}' not found", status=404)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, lambda: _start_profile_gateway(name))
+        except Exception as exc:
+            return _error(str(exc), status=500)
+        # Brief wait so health probe has a chance to succeed
+        await asyncio.sleep(2)
+        info = _read_profile_full_config(profile_dir)
+        gw_running = _profile_gateway_running(profile_dir, port=info.get("port", 0))
+        return _json_response(_profile_to_dict(name, profile_dir, info, gw_running))
+
+    async def _stop_profile_agent(self, agent_id: str) -> "web.Response":
+        name, profile_dir = self._resolve_profile_dir(agent_id)
+        if profile_dir is None:
+            return _error(f"Profile '{agent_id.removeprefix('hermes-profile-')}' not found", status=404)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, lambda: _stop_profile_gateway(name))
+        except Exception as exc:
+            return _error(str(exc), status=500)
+        info = _read_profile_full_config(profile_dir)
+        gw_running = _profile_gateway_running(profile_dir, port=info.get("port", 0))
+        return _json_response(_profile_to_dict(name, profile_dir, info, gw_running))
+
+    async def _restart_profile_agent(self, agent_id: str) -> "web.Response":
+        name, profile_dir = self._resolve_profile_dir(agent_id)
+        if profile_dir is None:
+            return _error(f"Profile '{agent_id.removeprefix('hermes-profile-')}' not found", status=404)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, lambda: _restart_profile_gateway(name))
+        except Exception as exc:
+            return _error(str(exc), status=500)
+        # Brief wait so the old process exits and health probe reflects new state
+        await asyncio.sleep(3)
+        info = _read_profile_full_config(profile_dir)
+        gw_running = _profile_gateway_running(profile_dir, port=info.get("port", 0))
+        return _json_response(_profile_to_dict(name, profile_dir, info, gw_running))
 
     async def _handle_restart_all(self, request: "web.Request") -> "web.Response":
         instances = self._manager.list_instances()
