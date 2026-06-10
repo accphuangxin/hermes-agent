@@ -301,6 +301,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     b_set_wd.add_argument("path", nargs="?", default=None,
                           help="Absolute path to use as default workdir. Omit to clear.")
 
+    # --- server (API Server) ---
+    from hermes_cli.kanban_server_cmd import add_kanban_server_subparser
+    add_kanban_server_subparser(sub)
+
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")

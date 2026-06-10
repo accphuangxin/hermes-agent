@@ -1,0 +1,314 @@
+"""Board management endpoints"""
+
+import json
+import time
+from pathlib import Path
+from aiohttp import web
+
+
+async def create_board(request: web.Request) -> web.Response:
+    """
+    Create a new Kanban board.
+
+    Request body:
+        {
+            "slug": "board-name",
+            "name": "Display Name",
+            "description": "Optional description",
+            "icon": "🏥",
+            "color": "#10b981"
+        }
+
+    Returns:
+        201 with created board info
+    """
+    try:
+        data = await request.json()
+
+        slug = data.get("slug")
+        name = data.get("name", slug)
+        description = data.get("description", "")
+        icon = data.get("icon", "📋")
+        color = data.get("color", "#3b82f6")
+
+        if not slug:
+            return web.json_response(
+                {"error": "Missing required field: slug"},
+                status=400
+            )
+
+        # Create board directory
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        board_dir = boards_root / slug
+
+        if board_dir.exists():
+            return web.json_response(
+                {"error": f"Board '{slug}' already exists"},
+                status=409
+            )
+
+        board_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create board metadata file
+        board_meta = {
+            "slug": slug,
+            "displayName": name,
+            "description": description,
+            "icon": icon,
+            "color": color,
+            "createdAt": time.time(),
+        }
+
+        meta_path = board_dir / "board.json"
+        meta_path.write_text(json.dumps(board_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        # Initialize board database
+        from hermes_cli import kanban_db
+        kanban_db.init_db(board=slug)
+
+        return web.json_response(board_meta, status=201)
+
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def list_boards(request: web.Request) -> web.Response:
+    """
+    List all available Kanban boards.
+
+    Returns:
+        JSON array of board metadata
+    """
+    try:
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        boards = []
+
+        if boards_root.exists():
+            for board_dir in boards_root.iterdir():
+                if board_dir.is_dir():
+                    meta_path = board_dir / "board.json"
+                    if meta_path.exists():
+                        try:
+                            board_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                            boards.append(board_meta)
+                        except Exception:
+                            # Skip boards with corrupted metadata
+                            pass
+
+        # Also check for default board (backward compatibility)
+        default_db = Path.home() / ".hermes" / "kanban.db"
+        if default_db.exists():
+            # Check if "default" board is already in list
+            if not any(b["slug"] == "default" for b in boards):
+                boards.append({
+                    "slug": "default",
+                    "displayName": "Default",
+                    "description": "Default Kanban board",
+                    "icon": "📋",
+                    "color": "#3b82f6",
+                })
+
+        return web.json_response({"boards": boards})
+
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def get_board(request: web.Request) -> web.Response:
+    """
+    Get board metadata and statistics.
+
+    Args:
+        request: Must contain {slug} in match_info
+
+    Returns:
+        JSON with board info and task statistics
+    """
+    slug = request.match_info["slug"]
+
+    try:
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        board_dir = boards_root / slug
+        meta_path = board_dir / "board.json"
+
+        if not meta_path.exists():
+            # Check for default board
+            if slug == "default" and (Path.home() / ".hermes" / "kanban.db").exists():
+                board_meta = {
+                    "slug": "default",
+                    "displayName": "Default",
+                    "description": "Default Kanban board",
+                    "icon": "📋",
+                    "color": "#3b82f6",
+                }
+            else:
+                return web.json_response(
+                    {"error": f"Board '{slug}' not found"},
+                    status=404
+                )
+        else:
+            board_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        # Add task statistics
+        from hermes_cli import kanban_db
+        conn = kanban_db.connect(board=slug)
+        tasks = kanban_db.list_tasks(conn)
+
+        board_meta["taskCount"] = len(tasks)
+        board_meta["statusCounts"] = {}
+
+        for task in tasks:
+            status = task.status
+            board_meta["statusCounts"][status] = board_meta["statusCounts"].get(status, 0) + 1
+
+        return web.json_response(board_meta)
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{slug}' not found"},
+            status=404
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def update_board(request: web.Request) -> web.Response:
+    """
+    Update board metadata.
+
+    Args:
+        request: Must contain {slug} in match_info
+
+    Request body:
+        {
+            "name": "New Display Name",
+            "description": "New description",
+            "icon": "🎯",
+            "color": "#ef4444"
+        }
+
+    Returns:
+        200 with updated board info
+    """
+    slug = request.match_info["slug"]
+
+    try:
+        data = await request.json()
+
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        board_dir = boards_root / slug
+        meta_path = board_dir / "board.json"
+
+        if not meta_path.exists():
+            return web.json_response(
+                {"error": f"Board '{slug}' not found"},
+                status=404
+            )
+
+        board_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        # Update fields
+        if "name" in data:
+            board_meta["displayName"] = data["name"]
+        if "description" in data:
+            board_meta["description"] = data["description"]
+        if "icon" in data:
+            board_meta["icon"] = data["icon"]
+        if "color" in data:
+            board_meta["color"] = data["color"]
+
+        board_meta["updatedAt"] = time.time()
+
+        # Save updated metadata
+        meta_path.write_text(json.dumps(board_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        return web.json_response(board_meta)
+
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def delete_board(request: web.Request) -> web.Response:
+    """
+    Delete a board and all its data.
+
+    Args:
+        request: Must contain {slug} in match_info
+
+    Returns:
+        204 No Content on success
+    """
+    slug = request.match_info["slug"]
+
+    try:
+        import shutil
+
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        board_dir = boards_root / slug
+
+        if not board_dir.exists():
+            return web.json_response(
+                {"error": f"Board '{slug}' not found"},
+                status=404
+            )
+
+        # Delete entire board directory
+        shutil.rmtree(board_dir)
+
+        return web.Response(status=204)
+
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def init_board(request: web.Request) -> web.Response:
+    """
+    Initialize or reinitialize board database schema.
+
+    Args:
+        request: Must contain {slug} in match_info
+
+    Returns:
+        200 with confirmation message
+    """
+    slug = request.match_info["slug"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        kanban_db.init_db(board=slug)
+
+        return web.json_response({
+            "message": f"Board '{slug}' database initialized successfully"
+        })
+
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )

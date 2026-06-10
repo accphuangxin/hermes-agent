@@ -992,7 +992,7 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
-DEFAULT_BUSY_TIMEOUT_MS = 120_000
+DEFAULT_BUSY_TIMEOUT_MS = 5_000  # 降低到5秒，避免永久挂起
 
 
 def _resolve_busy_timeout_ms() -> int:

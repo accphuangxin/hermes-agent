@@ -1,0 +1,508 @@
+"""Task CRUD and operations endpoints"""
+
+import json
+from aiohttp import web
+
+
+async def create_task(request: web.Request) -> web.Response:
+    """
+    Create a new task on a board.
+
+    Request body:
+        {
+            "title": "Task title",
+            "body": "Optional task description",
+            "assignee": "agent-name",
+            "priority": 5,
+            "metadata": {"key": "value"}
+        }
+
+    Returns:
+        201 with created task ID
+    """
+    board_slug = request.match_info["board"]
+
+    try:
+        data = await request.json()
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        try:
+            task_id = kanban_db.create_task(
+                conn,
+                title=data.get("title", ""),
+                body=data.get("body"),
+                assignee=data.get("assignee"),
+                priority=data.get("priority", 0),
+                skills=data.get("skills"),
+                max_retries=data.get("max_retries"),
+                max_runtime_seconds=data.get("max_runtime_seconds"),
+                tenant=data.get("tenant"),
+                session_id=data.get("session_id"),
+            )
+
+            return web.json_response(
+                {"task_id": task_id, "board": board_slug},
+                status=201
+            )
+        finally:
+            conn.close()
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def list_tasks(request: web.Request) -> web.Response:
+    """
+    List tasks on a board with optional filtering.
+
+    Query parameters:
+        - status: Filter by status (ready, running, done, blocked, failed, archived)
+        - assignee: Filter by assignee
+        - limit: Maximum number of tasks to return
+
+    Returns:
+        JSON array of tasks
+    """
+    board_slug = request.match_info["board"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        try:
+            # Get query parameters
+            status_filter = request.query.get("status")
+            assignee_filter = request.query.get("assignee")
+            limit = int(request.query.get("limit", 100))
+
+            # List tasks
+            tasks = kanban_db.list_tasks(
+                conn,
+                status=status_filter,
+                assignee=assignee_filter,
+            )
+
+            # Apply limit
+            tasks = tasks[:limit]
+
+            # Convert to dict format
+            tasks_data = [
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "body": task.body,
+                    "status": task.status,
+                    "assignee": task.assignee,
+                    "priority": task.priority,
+                    "created_at": task.created_at,
+                    "started_at": task.started_at,
+                    "completed_at": task.completed_at,
+                    "tenant": task.tenant,
+                }
+                for task in tasks
+            ]
+
+            return web.json_response(tasks_data)
+        finally:
+            conn.close()
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def get_task(request: web.Request) -> web.Response:
+    """
+    Get detailed task information.
+
+    Returns:
+        JSON with full task details
+    """
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        task = kanban_db.get_task(conn, task_id)
+
+        if not task:
+            return web.json_response(
+                {"error": f"Task '{task_id}' not found"},
+                status=404
+            )
+
+        # Get parents and children
+        parent_task_ids = kanban_db.parent_ids(conn, task_id)
+        child_task_ids = kanban_db.child_ids(conn, task_id)
+
+        # Fetch full task objects for parents and children
+        parents = [kanban_db.get_task(conn, pid) for pid in parent_task_ids if kanban_db.get_task(conn, pid)]
+        children = [kanban_db.get_task(conn, cid) for cid in child_task_ids if kanban_db.get_task(conn, cid)]
+
+        task_data = {
+            "id": task.id,
+            "title": task.title,
+            "body": task.body,
+            "status": task.status,
+            "assignee": task.assignee,
+            "priority": task.priority,
+            "created_at": task.created_at,
+            "started_at": task.started_at,
+            "completed_at": task.completed_at,
+            "result": task.result,
+            "consecutive_failures": task.consecutive_failures,
+            "claim_lock": task.claim_lock,
+            "claim_expires": task.claim_expires,
+            "worker_pid": task.worker_pid,
+            "tenant": task.tenant,
+            "created_by": task.created_by,
+            "parents": [p.id for p in parents],
+            "children": [c.id for c in children],
+        }
+
+        return web.json_response(task_data)
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def update_task(request: web.Request) -> web.Response:
+    """
+    Update task fields.
+
+    Request body can include:
+        - title
+        - body
+        - assignee
+        - priority
+
+    Returns:
+        200 with updated task info
+    """
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        data = await request.json()
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+
+        # Check task exists
+        task = kanban_db.get_task(conn, task_id)
+        if not task:
+            return web.json_response(
+                {"error": f"Task '{task_id}' not found"},
+                status=404
+            )
+
+        # Update fields
+        if "title" in data:
+            kanban_db.update_task_field(conn, task_id, "title", data["title"])
+        if "body" in data:
+            kanban_db.update_task_field(conn, task_id, "body", data["body"])
+        if "assignee" in data:
+            kanban_db.update_task_field(conn, task_id, "assignee", data["assignee"])
+        if "priority" in data:
+            kanban_db.update_task_field(conn, task_id, "priority", data["priority"])
+
+        # Get updated task
+        task = kanban_db.get_task(conn, task_id)
+
+        return web.json_response({
+            "id": task.id,
+            "title": task.title,
+            "body": task.body,
+            "status": task.status,
+            "assignee": task.assignee,
+            "priority": task.priority,
+        })
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def delete_task(request: web.Request) -> web.Response:
+    """
+    Delete a task.
+
+    Returns:
+        204 No Content on success
+    """
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+
+        # Archive task instead of hard delete (safer)
+        kanban_db.archive_task(conn, task_id)
+
+        return web.Response(status=204)
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+# Task operations
+
+async def claim_task(request: web.Request) -> web.Response:
+    """Claim a task for execution"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+
+        success = kanban_db.claim_task(conn, task_id)
+
+        if success:
+            return web.json_response({"message": "Task claimed successfully"})
+        else:
+            return web.json_response(
+                {"error": "Failed to claim task (already claimed or not ready)"},
+                status=409
+            )
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def complete_task(request: web.Request) -> web.Response:
+    """Mark a task as complete"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        data = await request.json()
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+
+        kanban_db.complete_task(
+            conn,
+            task_id,
+            result=data.get("result"),
+        )
+
+        return web.json_response({"message": "Task completed successfully"})
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def block_task(request: web.Request) -> web.Response:
+    """Block a task"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        kanban_db.block_task(conn, task_id)
+
+        return web.json_response({"message": "Task blocked successfully"})
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def unblock_task(request: web.Request) -> web.Response:
+    """Unblock a task"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        kanban_db.unblock_task(conn, task_id)
+
+        return web.json_response({"message": "Task unblocked successfully"})
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def archive_task(request: web.Request) -> web.Response:
+    """Archive a task"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        kanban_db.archive_task(conn, task_id)
+
+        return web.json_response({"message": "Task archived successfully"})
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# Dependency management
+
+async def link_tasks(request: web.Request) -> web.Response:
+    """Create a dependency link between tasks"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        data = await request.json()
+        parent_id = data.get("parent_id")
+
+        if not parent_id:
+            return web.json_response(
+                {"error": "Missing required field: parent_id"},
+                status=400
+            )
+
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        kanban_db.link_tasks(conn, parent_id, task_id)
+
+        return web.json_response({
+            "message": f"Linked {parent_id} → {task_id}"
+        }, status=201)
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def unlink_tasks(request: web.Request) -> web.Response:
+    """Remove a dependency link"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        data = await request.json()
+        parent_id = data.get("parent_id")
+
+        if not parent_id:
+            return web.json_response(
+                {"error": "Missing required field: parent_id"},
+                status=400
+            )
+
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        kanban_db.unlink_tasks(conn, parent_id, task_id)
+
+        return web.json_response({
+            "message": f"Unlinked {parent_id} → {task_id}"
+        })
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def get_parents(request: web.Request) -> web.Response:
+    """Get parent tasks (dependencies)"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        parent_ids_list = kanban_db.parent_ids(conn, task_id)
+
+        parents = []
+        for pid in parent_ids_list:
+            task = kanban_db.get_task(conn, pid)
+            if task:
+                parents.append({"id": task.id, "title": task.title, "status": task.status})
+
+        return web.json_response({
+            "task_id": task_id,
+            "parents": parents
+        })
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def get_children(request: web.Request) -> web.Response:
+    """Get child tasks (dependents)"""
+    board_slug = request.match_info["board"]
+    task_id = request.match_info["task_id"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        child_ids_list = kanban_db.child_ids(conn, task_id)
+
+        children = []
+        for cid in child_ids_list:
+            task = kanban_db.get_task(conn, cid)
+            if task:
+                children.append({"id": task.id, "title": task.title, "status": task.status})
+
+        return web.json_response({
+            "task_id": task_id,
+            "children": children
+        })
+
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)

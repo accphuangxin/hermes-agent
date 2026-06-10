@@ -1,0 +1,122 @@
+"""Health check endpoints"""
+
+import time
+from aiohttp import web
+
+
+async def health_check(request: web.Request) -> web.Response:
+    """
+    Health check endpoint.
+
+    Returns:
+        JSON response with status and timestamp
+    """
+    return web.json_response({
+        "status": "ok",
+        "timestamp": time.time(),
+        "service": "hermes-kanban-server"
+    })
+
+
+async def stats(request: web.Request) -> web.Response:
+    """
+    Get global statistics across all boards.
+
+    Returns:
+        JSON response with task counts and status distribution
+    """
+    try:
+        from hermes_cli import kanban_db
+        from pathlib import Path
+        import os
+
+        # Find all board databases
+        boards_root = Path.home() / ".hermes" / "kanban" / "boards"
+        stats_data = {
+            "total_boards": 0,
+            "total_tasks": 0,
+            "status_distribution": {},
+        }
+
+        if boards_root.exists():
+            for board_dir in boards_root.iterdir():
+                if board_dir.is_dir():
+                    db_path = board_dir / "kanban.db"
+                    if db_path.exists():
+                        stats_data["total_boards"] += 1
+
+                        # Connect and count tasks
+                        try:
+                            conn = kanban_db.connect(board=board_dir.name)
+                            tasks = kanban_db.list_tasks(conn)
+
+                            stats_data["total_tasks"] += len(tasks)
+
+                            # Count by status
+                            for task in tasks:
+                                status = task.status
+                                stats_data["status_distribution"][status] = (
+                                    stats_data["status_distribution"].get(status, 0) + 1
+                                )
+                        except Exception:
+                            pass  # Skip boards with errors
+
+        return web.json_response(stats_data)
+
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
+
+
+async def board_stats(request: web.Request) -> web.Response:
+    """
+    Get statistics for a specific board.
+
+    Args:
+        request: Must contain {board} in match_info
+
+    Returns:
+        JSON response with task counts and status distribution
+    """
+    board_slug = request.match_info["board"]
+
+    try:
+        from hermes_cli import kanban_db
+
+        conn = kanban_db.connect(board=board_slug)
+        tasks = kanban_db.list_tasks(conn)
+
+        stats_data = {
+            "board": board_slug,
+            "total_tasks": len(tasks),
+            "status_distribution": {},
+            "assignee_distribution": {},
+        }
+
+        for task in tasks:
+            # Count by status
+            status = task.status
+            stats_data["status_distribution"][status] = (
+                stats_data["status_distribution"].get(status, 0) + 1
+            )
+
+            # Count by assignee
+            if task.assignee:
+                stats_data["assignee_distribution"][task.assignee] = (
+                    stats_data["assignee_distribution"].get(task.assignee, 0) + 1
+                )
+
+        return web.json_response(stats_data)
+
+    except FileNotFoundError:
+        return web.json_response(
+            {"error": f"Board '{board_slug}' not found"},
+            status=404
+        )
+    except Exception as e:
+        return web.json_response(
+            {"error": str(e)},
+            status=500
+        )
