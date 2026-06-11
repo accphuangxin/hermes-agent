@@ -39,7 +39,7 @@ from pathlib import Path
 
 _SERVICE_LABEL  = "ai.hermes.agent-manager"
 _SERVICE_NAME   = "hermes-agent-manager"   # systemd unit name
-_DEFAULT_HOST   = os.getenv("AGENT_MANAGER_HOST", "127.0.0.1")
+_DEFAULT_HOST   = os.getenv("AGENT_MANAGER_HOST", "0.0.0.0")
 _DEFAULT_PORT   = int(os.getenv("AGENT_MANAGER_PORT", "8640"))
 _DEFAULT_KEY    = os.getenv("AGENT_MANAGER_KEY", "")
 _DEFAULT_DB     = os.getenv("AGENT_MANAGER_DB", "")

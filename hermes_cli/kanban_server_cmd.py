@@ -38,8 +38,8 @@ def add_kanban_server_subparser(subparsers):
     )
     run_parser.add_argument(
         "--host",
-        default=os.environ.get("KANBAN_SERVER_HOST", "127.0.0.1"),
-        help="Bind host (default: 127.0.0.1)"
+        default=os.environ.get("KANBAN_SERVER_HOST", "0.0.0.0"),
+        help="Bind host (default: 0.0.0.0)"
     )
     run_parser.add_argument(
         "--port",
@@ -58,7 +58,7 @@ def add_kanban_server_subparser(subparsers):
         "install",
         help="Install as system service (launchd/systemd)"
     )
-    install_parser.add_argument("--host", default="127.0.0.1")
+    install_parser.add_argument("--host", default="0.0.0.0")
     install_parser.add_argument("--port", type=int, default=8650)
     install_parser.add_argument("--api-key", help="API key")
 

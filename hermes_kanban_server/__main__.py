@@ -39,7 +39,7 @@ from pathlib import Path
 
 _SERVICE_LABEL  = "ai.hermes.kanban-server"
 _SERVICE_NAME   = "hermes-kanban-server"   # systemd unit name
-_DEFAULT_HOST   = os.getenv("KANBAN_SERVER_HOST", "127.0.0.1")
+_DEFAULT_HOST   = os.getenv("KANBAN_SERVER_HOST", "0.0.0.0")
 _DEFAULT_PORT   = int(os.getenv("KANBAN_SERVER_PORT", "8650"))
 _DEFAULT_KEY    = os.getenv("KANBAN_SERVER_API_KEY", "")
 _PID_FILE_NAME  = "kanban_server.pid"

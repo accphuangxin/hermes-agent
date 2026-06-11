@@ -789,6 +789,22 @@ def build_anthropic_bedrock_client(region: str):
             "Upgrade with: pip install 'anthropic>=0.39.0'"
         )
     from httpx import Timeout
+    import os
+
+    # Support AWS_BEARER_TOKEN_BEDROCK (Claude Code / IAM Identity Center personal access token).
+    # The AnthropicBedrock SDK uses boto3 SigV4 signing internally, which doesn't recognise this
+    # token type. Patch the auth layer to emit a plain Bearer header instead.
+    bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+    if bearer_token:
+        try:
+            import anthropic.lib.bedrock._auth as _bedrock_auth
+
+            def _bearer_auth_headers(**kwargs):
+                return {"Authorization": f"Bearer {bearer_token}"}
+
+            _bedrock_auth.get_auth_headers = _bearer_auth_headers
+        except Exception:
+            pass
 
     return _anthropic_sdk.AnthropicBedrock(
         aws_region=region,
