@@ -15,9 +15,9 @@
         <os-version min="13.0"/>
     </allowed-os-versions>
 
-    <!-- Prevent Installer.app from re-launching under Rosetta for arm64-only packages -->
+    <!-- Restrict to the target architecture of this package build -->
     <hostArchitectures>
-        <arch>arm64</arch>
+        <arch>@ARCH@</arch>
     </hostArchitectures>
 
     <!-- Background image shown in the installer window (placed in resources/) -->

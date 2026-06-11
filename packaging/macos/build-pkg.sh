@@ -175,6 +175,14 @@ printf '%s\nexec "${HERMES_HOME}/venv/bin/hermes-agent-manager" "$@"\n' "${LAUNC
     > "${PAYLOAD_DIR}${BIN_DIR}/hermes-agent-manager"
 chmod +x "${PAYLOAD_DIR}${BIN_DIR}/hermes-agent-manager"
 
+printf '%s\nexec "${HERMES_HOME}/venv/bin/ham" "$@"\n' "${LAUNCHER_PREAMBLE}" \
+    > "${PAYLOAD_DIR}${BIN_DIR}/ham"
+chmod +x "${PAYLOAD_DIR}${BIN_DIR}/ham"
+
+printf '%s\nexec "${HERMES_HOME}/venv/bin/hks" "$@"\n' "${LAUNCHER_PREAMBLE}" \
+    > "${PAYLOAD_DIR}${BIN_DIR}/hks"
+chmod +x "${PAYLOAD_DIR}${BIN_DIR}/hks"
+
 # ── Step 4: Build component pkg ───────────────────────────────────────────────
 echo "==> Building component package"
 pkgbuild \
@@ -188,10 +196,16 @@ pkgbuild \
 echo "==> Assembling distribution package"
 
 # Substitute the versioned component package name into a temporary distribution XML.
+# Use arch-specific distribution.xml if it exists, otherwise fall back to the default.
 PKG_COMPONENT_BASENAME="$(basename "${PKG_COMPONENT}")"
 DIST_XML_TMP="${BUILD_DIR}/distribution.xml"
-sed "s|@COMPONENT_PKG_NAME@|${PKG_COMPONENT_BASENAME}|g" \
-    "$(pwd)/packaging/macos/distribution.xml" > "${DIST_XML_TMP}"
+DIST_XML_ARCH="$(pwd)/packaging/macos/distribution-${ARCH}.xml"
+DIST_XML_SRC="$(pwd)/packaging/macos/distribution.xml"
+if [[ -f "${DIST_XML_ARCH}" ]]; then
+    DIST_XML_SRC="${DIST_XML_ARCH}"
+fi
+sed "s|@COMPONENT_PKG_NAME@|${PKG_COMPONENT_BASENAME}|g;s|@ARCH@|${ARCH}|g" \
+    "${DIST_XML_SRC}" > "${DIST_XML_TMP}"
 
 SIGN_ARGS=()
 if [[ -n "${DEVELOPER_ID_INSTALLER:-}" ]]; then

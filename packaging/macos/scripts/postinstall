@@ -129,14 +129,26 @@ PYEOF
 # ── Verify the venv works ─────────────────────────────────────────────────────
 echo "==> Verifying installation"
 VERIFY_ERR=$("${VENV_DIR}/bin/python3" -c "import hermes_cli" 2>&1)
-if [[ $? -ne 0 ]]; then
+VERIFY_EXIT=$?
+if [[ ${VERIFY_EXIT} -ne 0 ]]; then
     echo "error: venv verification failed — hermes_cli not importable" >&2
-    echo "  python: ${VENV_DIR}/bin/python3" >&2
-    echo "  error:  ${VERIFY_ERR}" >&2
+    echo "  python:   ${VENV_DIR}/bin/python3" >&2
+    echo "  arch:     $(uname -m)" >&2
+    echo "  error:    ${VERIFY_ERR}" >&2
+    # 检查 python3 二进制架构是否与系统匹配
+    if command -v file &>/dev/null; then
+        echo "  binary:   $(file "${VENV_DIR}/bin/python3" 2>/dev/null)" >&2
+    fi
     # Print pyvenv.cfg for diagnosis
     if [[ -f "${VENV_DIR}/pyvenv.cfg" ]]; then
         echo "  pyvenv.cfg:" >&2
         cat "${VENV_DIR}/pyvenv.cfg" >&2
+    fi
+    # 列出 site-packages 里是否有 hermes_cli
+    SP=$("${VENV_DIR}/bin/python3" -c "import sysconfig; print(sysconfig.get_path('purelib'))" 2>/dev/null || true)
+    if [[ -n "${SP}" ]]; then
+        echo "  site-packages: ${SP}" >&2
+        ls "${SP}/hermes_cli" 2>/dev/null | head -5 >&2 || echo "  hermes_cli dir not found in site-packages" >&2
     fi
     exit 1
 fi
@@ -144,7 +156,8 @@ echo "    OK"
 
 # ── Fix permissions ───────────────────────────────────────────────────────────
 chmod -R a+rX "${INSTALL_DIR}"
-chmod 755 "${BIN_DIR}/hermes" "${BIN_DIR}/hermes-agent" "${BIN_DIR}/hermes-acp" 2>/dev/null || true
+chmod 755 "${BIN_DIR}/hermes" "${BIN_DIR}/hermes-agent" "${BIN_DIR}/hermes-acp" \
+          "${BIN_DIR}/hermes-agent-manager" "${BIN_DIR}/ham" "${BIN_DIR}/hks" 2>/dev/null || true
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
