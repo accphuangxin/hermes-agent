@@ -566,6 +566,13 @@ class ControlServer:
         api_port    = body.get("api_server_port") or body.get("port")
         api_key     = (body.get("api_server_key") or body.get("api_key") or "").strip()
 
+        if not api_key:
+            return _error(
+                "api_server_key 未设置。请在请求中提供 'api_server_key' 字段，"
+                "客户端通过 'Authorization: Bearer <api_server_key>' 访问该 Agent 服务。",
+                status=400,
+            )
+
         try:
             import asyncio, os
             loop = asyncio.get_event_loop()
@@ -616,15 +623,45 @@ class ControlServer:
                 lambda: _install_and_start_gateway(name),
             )
 
+            # 7. 等待 gateway 真正就绪（最多 30 秒）
+            info = _read_profile_full_config(profile_dir)
+            gw_port = info.get("port", 0)
+            if gw_port:
+                deadline = asyncio.get_event_loop().time() + 30
+                ready = False
+                while asyncio.get_event_loop().time() < deadline:
+                    healthy = await loop.run_in_executor(
+                        None,
+                        lambda: _profile_gateway_running(profile_dir, port=gw_port),
+                    )
+                    if healthy:
+                        ready = True
+                        break
+                    await asyncio.sleep(0.5)
+                if not ready:
+                    return _error(
+                        f"Agent '{name}' 启动超时（30s），服务未就绪。"
+                        f"请检查端口 {gw_port} 是否被占用，或查看日志排查原因。",
+                        status=503,
+                    )
+
         except FileExistsError as exc:
             return _error(str(exc), status=409)
         except (ValueError, FileNotFoundError) as exc:
             return _error(str(exc))
         except Exception as exc:
-            logger.exception("create profile failed")
-            return _error(str(exc), status=500)
+            err_str = str(exc)
+            # skills symlink 错误是非致命的（source profile 里有坏符号链接）
+            # profile 和 gateway 已经创建成功，只是部分 skill 未能复制
+            if "symlink" in err_str.lower() or ("No such file or directory" in err_str and "skills" in err_str):
+                logger.warning("create profile: skills symlink warning (non-fatal): %s", err_str)
+                # 继续返回成功（profile_dir 在 try 块内已赋值）
+                profile_dir = _real_hermes_home() / "profiles" / name
+            else:
+                logger.exception("create profile failed")
+                return _error(err_str, status=500)
 
-        # 6. 返回新 profile 的完整信息
+        # 返回新 profile 的完整信息
         info = _read_profile_full_config(profile_dir)
         gw_running = _profile_gateway_running(profile_dir, port=info.get("port", 0))
         return _json_response(_profile_to_dict(name, profile_dir, info, gw_running), status=201)
@@ -804,6 +841,8 @@ class ControlServer:
             instance = await self._manager.start_agent(agent_id)
         except KeyError:
             return _error(f"Agent {agent_id!r} not found", status=404)
+        except ValueError as exc:
+            return _error(str(exc), status=400)
         except RuntimeError as exc:
             return _error(str(exc), status=409)
         except Exception as exc:
@@ -831,6 +870,10 @@ class ControlServer:
             instance = await self._manager.restart_agent(agent_id)
         except KeyError:
             return _error(f"Agent {agent_id!r} not found", status=404)
+        except ValueError as exc:
+            return _error(str(exc), status=400)
+        except RuntimeError as exc:
+            return _error(str(exc), status=409)
         except Exception as exc:
             return _error(str(exc), status=500)
         return _json_response(instance.to_dict())

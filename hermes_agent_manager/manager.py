@@ -14,9 +14,11 @@ from .store import AgentStore
 
 logger = logging.getLogger(__name__)
 
-_FREE_PORT_START  = 8700
-_FREE_PORT_END    = 8999
-_GC_INTERVAL      = 60   # seconds between orphan-gc runs
+_FREE_PORT_START   = 8700
+_FREE_PORT_END     = 8999
+_GC_INTERVAL       = 60    # seconds between orphan-gc runs
+_START_TIMEOUT     = 30    # seconds to wait for agent health check after connect()
+_START_POLL_INTERVAL = 0.5 # seconds between health check polls
 
 
 def _real_hermes_home() -> Path:
@@ -254,7 +256,10 @@ class AgentManager:
 
     async def create_agent(self, cfg: AgentConfig) -> AgentConfig:
         if not cfg.api_key:
-            raise ValueError("api_key is required (api_server enforces Bearer auth)")
+            raise ValueError(
+                "api_key 未设置。请在创建 Agent 时提供 api_key，"
+                "客户端需通过 'Authorization: Bearer <api_key>' 进行认证。"
+            )
 
         if cfg.port == 0:
             cfg.port = _find_free_port()
@@ -304,10 +309,47 @@ class AgentManager:
             instance.error  = ""
 
         try:
+            if not instance.config.api_key:
+                raise ValueError(
+                    "api_key 未设置。请先配置 api_key，"
+                    "客户端需通过 'Authorization: Bearer <api_key>' 进行认证。"
+                )
+
             adapter = AgentAPIAdapter(instance.config)
             ok = await adapter.connect()
             if not ok:
                 raise RuntimeError("adapter.connect() returned False — check api_key and port")
+
+            # 等待 HTTP 健康检查通过，确认服务真正就绪
+            host = instance.config.host or "127.0.0.1"
+            port = instance.config.port
+            health_url = f"http://{host}:{port}/health"
+            deadline = time.time() + _START_TIMEOUT
+            ready = False
+            last_err = ""
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    while time.time() < deadline:
+                        try:
+                            async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                                if resp.status == 200:
+                                    ready = True
+                                    break
+                                last_err = f"HTTP {resp.status}"
+                        except Exception as e:
+                            last_err = str(e)
+                        await asyncio.sleep(_START_POLL_INTERVAL)
+            except ImportError:
+                # aiohttp 不可用时跳过健康检查（不应发生，但做保护）
+                ready = True
+
+            if not ready:
+                await adapter.disconnect()
+                raise RuntimeError(
+                    f"Agent {instance.config.name!r} 在 {_START_TIMEOUT}s 内未就绪，"
+                    f"最后错误: {last_err}。请检查端口 {port} 是否被占用或配置是否正确。"
+                )
 
             async with self._lock:
                 instance.adapter     = adapter
@@ -315,7 +357,7 @@ class AgentManager:
                 instance.status      = AgentStatus.RUNNING
                 instance.started_at  = time.time()
 
-            logger.info("Agent %r started on port %d", instance.config.name, instance.actual_port)
+            logger.info("Agent %r started and healthy on port %d", instance.config.name, instance.actual_port)
         except Exception as exc:
             async with self._lock:
                 instance.status = AgentStatus.ERROR
