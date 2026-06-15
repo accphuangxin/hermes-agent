@@ -181,6 +181,7 @@ const
 procedure RelocateVenv();
 var
   appDir, pyExe, relocScript, tmpScript: String;
+  ResultCode: Integer;
 begin
   appDir := ExpandConstant('{app}');
   pyExe  := appDir + '\python.exe';
@@ -239,7 +240,7 @@ begin
   tmpScript := appDir + '\relocate_venv.py';
   SaveStringToFile(tmpScript, relocScript, False);
   Exec(pyExe, '"' + tmpScript + '" "' + appDir + '"', appDir,
-       SW_HIDE, ewWaitUntilTerminated, 0);
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
   DeleteFile(tmpScript);
 end;
 
