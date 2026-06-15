@@ -115,13 +115,26 @@ Write-Host "==> Verifying install"
 $BinDir = "$STAGING_DIR\bin"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
-# Launchers use {app} which Inno Setup expands to $INSTDIR at install time.
-# For the staging copy we use a placeholder; Inno Setup rewrites them via
-# the [Files] + AfterInstall hook below.
-foreach ($cmd in @("hermes", "hermes-agent", "hermes-acp")) {
-    Set-Content -Path "$BinDir\$cmd.cmd" `
-        -Value "@echo off`r`n`"{app}\venv\Scripts\$cmd.exe`" %*`r`n" `
-        -NoNewline
+# Launchers call the embedded python.exe directly (not hermes.exe) to avoid
+# the "Unable to create process" error caused by pip-generated .exe launchers
+# embedding the build-machine Python path.  Using python.exe -m ensures the
+# correct interpreter is used regardless of where the package was installed.
+$EntryPoints = @{
+    "hermes"              = "hermes_cli.main:main"
+    "hermes-agent"        = "run_agent:main"
+    "hermes-acp"          = "acp_adapter.entry:main"
+    "hermes-agent-manager" = "hermes_agent_manager.__main__:main"
+    "ham"                 = "hermes_agent_manager.__main__:main"
+    "hks"                 = "hermes_kanban_server.__main__:main"
+    "hermes-kanban-server" = "hermes_kanban_server.__main__:main"
+}
+foreach ($name in $EntryPoints.Keys) {
+    $module = $EntryPoints[$name] -replace ":.*", ""
+    $func   = $EntryPoints[$name] -replace ".*:", ""
+    # Use {app} placeholder — Inno Setup's FixLaunchers() replaces it with real install path.
+    # venv\Scripts\python.exe auto-activates the venv so site-packages are on sys.path.
+    $cmdContent = "@echo off`r`n`"{app}\venv\Scripts\python.exe`" -c `"import sys; from $module import $func; sys.exit($func())`" %*`r`n"
+    Set-Content -Path "$BinDir\$name.cmd" -Value $cmdContent -NoNewline
 }
 Write-Host "==> Launchers written to $BinDir"
 
@@ -162,22 +175,97 @@ Type: filesandordirs; Name: "{app}"
 const
   PathRegKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
 
-// Rewrite launcher .cmd files with the actual install path.
+// Relocate the venv: rewrite pyvenv.cfg and all Scripts/*.exe launchers so
+// they point to the real install dir instead of the build-machine staging path.
+// Also rewrites the .cmd launchers' {app} placeholder.
+procedure RelocateVenv();
+var
+  appDir, pyExe, relocScript, tmpScript: String;
+begin
+  appDir := ExpandConstant('{app}');
+  pyExe  := appDir + '\python.exe';
+
+  // Inline Python relocation script — same logic as macOS postinstall
+  relocScript :=
+    'import os, sys' + #10 +
+    'install_dir = sys.argv[1]' + #10 +
+    'venv_dir = os.path.join(install_dir, "venv")' + #10 +
+    'pyvenv_cfg = os.path.join(venv_dir, "pyvenv.cfg")' + #10 +
+    'build_prefix = None' + #10 +
+    'try:' + #10 +
+    '    with open(pyvenv_cfg) as f:' + #10 +
+    '        for line in f:' + #10 +
+    '            if line.startswith("home = "):' + #10 +
+    '                home = line.split("=",1)[1].strip()' + #10 +
+    '                build_prefix = home.replace("\\\\Scripts","").replace("/Scripts","")' + #10 +
+    '                break' + #10 +
+    'except Exception as e:' + #10 +
+    '    print("warn: pyvenv.cfg read failed:", e)' + #10 +
+    'if not build_prefix or build_prefix == install_dir:' + #10 +
+    '    print("paths already correct")' + #10 +
+    '    sys.exit(0)' + #10 +
+    'print("relocating:", build_prefix, "->", install_dir)' + #10 +
+    'old = build_prefix.encode()' + #10 +
+    'new = install_dir.encode()' + #10 +
+    'scripts = os.path.join(venv_dir, "Scripts")' + #10 +
+    'rewritten = 0' + #10 +
+    'for name in os.listdir(scripts):' + #10 +
+    '    p = os.path.join(scripts, name)' + #10 +
+    '    if not os.path.isfile(p): continue' + #10 +
+    '    try:' + #10 +
+    '        data = open(p,"rb").read()' + #10 +
+    '        if old not in data: continue' + #10 +
+    '        open(p,"wb").write(data.replace(old,new))' + #10 +
+    '        rewritten += 1' + #10 +
+    '        print("  rewrote:", name)' + #10 +
+    '    except Exception as e:' + #10 +
+    '        print("  skip:", name, e)' + #10 +
+    'for dirpath, _, files in os.walk(os.path.join(venv_dir,"Lib")):' + #10 +
+    '    for name in files:' + #10 +
+    '        if not name.endswith((".pth",".json","RECORD")): continue' + #10 +
+    '        p = os.path.join(dirpath,name)' + #10 +
+    '        try:' + #10 +
+    '            data = open(p,"rb").read()' + #10 +
+    '            if old not in data: continue' + #10 +
+    '            open(p,"wb").write(data.replace(old,new))' + #10 +
+    '            rewritten += 1' + #10 +
+    '        except: pass' + #10 +
+    'try:' + #10 +
+    '    data = open(pyvenv_cfg,"rb").read()' + #10 +
+    '    open(pyvenv_cfg,"wb").write(data.replace(old,new))' + #10 +
+    'except: pass' + #10 +
+    'print("done, rewrote", rewritten, "files")' + #10;
+
+  tmpScript := appDir + '\relocate_venv.py';
+  SaveStringToFile(tmpScript, relocScript, False);
+  Exec(pyExe, '"' + tmpScript + '" "' + appDir + '"', appDir,
+       SW_HIDE, ewWaitUntilTerminated, 0);
+  DeleteFile(tmpScript);
+end;
+
+// Rewrite .cmd launcher {app} placeholders with real install path.
 procedure FixLaunchers();
 var
-  appDir, cmdName, content: String;
+  appDir, cmdName, oldContent, newContent: String;
   i: Integer;
-  cmds: array[0..2] of String;
+  cmds: array[0..6] of String;
 begin
   appDir := ExpandConstant('{app}');
   cmds[0] := 'hermes';
   cmds[1] := 'hermes-agent';
   cmds[2] := 'hermes-acp';
-  for i := 0 to 2 do begin
+  cmds[3] := 'hermes-agent-manager';
+  cmds[4] := 'ham';
+  cmds[5] := 'hks';
+  cmds[6] := 'hermes-kanban-server';
+  for i := 0 to 6 do begin
     cmdName := cmds[i];
-    content := '@echo off' + #13#10 +
-               '"' + appDir + '\venv\Scripts\' + cmdName + '.exe" %*' + #13#10;
-    SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', content, False);
+    if FileExists(appDir + '\bin\' + cmdName + '.cmd') then begin
+      LoadStringFromFile(appDir + '\bin\' + cmdName + '.cmd', oldContent);
+      newContent := oldContent;
+      StringChangeEx(newContent, '{app}', appDir, True);
+      SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', newContent, False);
+    end;
   end;
 end;
 
@@ -200,8 +288,9 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
-    FixLaunchers();
-    AddToPath();
+    RelocateVenv();   // rewrite build-machine paths in venv Scripts/*.exe
+    FixLaunchers();   // replace {app} in .cmd launchers
+    AddToPath();      // add {app}\bin to system PATH
   end;
 end;
 
