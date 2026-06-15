@@ -245,29 +245,30 @@ begin
 end;
 
 // Rewrite .cmd launcher {app} placeholders with real install path.
+procedure FixOneLauncher(appDir, cmdName: String);
+var
+  oldContent, newContent: String;
+begin
+  if FileExists(appDir + '\bin\' + cmdName + '.cmd') then begin
+    LoadStringFromFile(appDir + '\bin\' + cmdName + '.cmd', oldContent);
+    newContent := oldContent;
+    StringChangeEx(newContent, '{app}', appDir, True);
+    SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', newContent, False);
+  end;
+end;
+
 procedure FixLaunchers();
 var
-  appDir, cmdName, oldContent, newContent: String;
-  i: Integer;
-  cmds: array[0..6] of String;
+  appDir: String;
 begin
   appDir := ExpandConstant('{app}');
-  cmds[0] := 'hermes';
-  cmds[1] := 'hermes-agent';
-  cmds[2] := 'hermes-acp';
-  cmds[3] := 'hermes-agent-manager';
-  cmds[4] := 'ham';
-  cmds[5] := 'hks';
-  cmds[6] := 'hermes-kanban-server';
-  for i := 0 to 6 do begin
-    cmdName := cmds[i];
-    if FileExists(appDir + '\bin\' + cmdName + '.cmd') then begin
-      LoadStringFromFile(appDir + '\bin\' + cmdName + '.cmd', oldContent);
-      newContent := oldContent;
-      StringChangeEx(newContent, '{app}', appDir, True);
-      SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', newContent, False);
-    end;
-  end;
+  FixOneLauncher(appDir, 'hermes');
+  FixOneLauncher(appDir, 'hermes-agent');
+  FixOneLauncher(appDir, 'hermes-acp');
+  FixOneLauncher(appDir, 'hermes-agent-manager');
+  FixOneLauncher(appDir, 'ham');
+  FixOneLauncher(appDir, 'hks');
+  FixOneLauncher(appDir, 'hermes-kanban-server');
 end;
 
 // Add {app}\bin to system PATH (skip if already present).
