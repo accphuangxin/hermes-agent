@@ -810,6 +810,10 @@ class ControlServer:
             api_port = body.get("api_server_port")
             api_key  = body.get("api_server_key")
             if api_port is not None or api_key is not None:
+                # 传 0 时自动分配空闲端口，避免写入无效值
+                if api_port is not None and int(api_port) == 0:
+                    from hermes_agent_manager.manager import _find_free_port
+                    api_port = _find_free_port()
                 _patch_profile_api_server(
                     profile_dir,
                     port=int(api_port) if api_port is not None else None,
