@@ -345,20 +345,18 @@ def _patch_profile_api_server(profile_dir, port=None, key=None) -> None:
         # 写入 extra 块
         if port is not None:
             api_cfg["extra"]["port"] = int(port)
-            # 删除顶层同名字段，避免与 extra 中的值冲突
-            api_cfg.pop("port", None)
         if key is not None:
             api_cfg["extra"]["key"] = str(key)
-            # 删除顶层旧 key（克隆时从 default 带过来的），以 extra.key 为准
-            api_cfg.pop("key", None)
-            # 删除 extra 中遗留的 api_key（克隆时从旧配置带过来）
-            api_cfg["extra"].pop("api_key", None)
-        # 保留 cors_origins（如果已有则不覆盖）
+
+        # 保证 cors_origins 在 extra 里
         if "cors_origins" not in api_cfg["extra"]:
             api_cfg["extra"]["cors_origins"] = "*"
-        # 顶层 cors_origins 也统一移到 extra 下
-        if "cors_origins" in api_cfg and "cors_origins" in api_cfg["extra"]:
-            api_cfg.pop("cors_origins", None)
+
+        # 无条件清理所有顶层脏字段（clone/旧格式可能带入）
+        for _f in ("port", "key", "api_key", "cors_origins"):
+            api_cfg.pop(_f, None)
+        # 清理 extra 里的 api_key（旧字段名）
+        api_cfg["extra"].pop("api_key", None)
 
         with open(cfg_file, "w", encoding="utf-8") as f:
             ry.dump(cfg, f)
