@@ -266,45 +266,13 @@ def _spawn_gateway(profile_name: str, hermes_bin: str, env: dict) -> None:
 
 
 def _restart_profile_gateway(profile_name: str) -> None:
-    """重启指定 profile 的 gateway 服务（后台执行，不阻塞）。
+    """重启指定 profile 的 gateway 服务。
 
-    策略：
-    1. 先尝试 `hermes gateway restart`（走 launchd/systemd）
-    2. restart 命令成功后等待最多 5s 确认 gateway 真的活着
-    3. 如果超时或命令失败，直接 spawn 新进程
+    始终使用当前 venv 的 hermes（即 agent-manager 自身所在的 venv）来 spawn
+    gateway，确保新进程使用最新代码。不走 launchd/systemd restart，因为 plist
+    里写死的是安装包路径（/usr/local/hermes/venv），重启后会加载旧代码。
     """
-    import subprocess, time
-    from pathlib import Path as _P
-
     hermes_bin, env = _profile_env(profile_name)
-    port = _get_profile_api_port(profile_name)
-
-    result = subprocess.run(
-        [hermes_bin, "gateway", "restart"],
-        env=env,
-        capture_output=True,
-        timeout=10,
-    )
-
-    if result.returncode == 0:
-        logger.info("Gateway restart triggered for profile %r (launchd/systemd)", profile_name)
-        # 验证 gateway 真的重启成功（最多等 5s）
-        for _ in range(10):
-            time.sleep(0.5)
-            if _gateway_alive(port):
-                logger.info("Gateway confirmed alive for profile %r on port %d", profile_name, port)
-                return
-        # launchd restart 返回 0 但 gateway 没活——fallback 到直接 spawn
-        logger.warning(
-            "Gateway restart returned 0 but health check failed for %r, spawning directly",
-            profile_name,
-        )
-    else:
-        logger.info(
-            "Gateway restart failed for %r (rc=%d), spawning directly",
-            profile_name, result.returncode,
-        )
-
     _spawn_gateway(profile_name, hermes_bin, env)
 
 
