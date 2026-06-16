@@ -4454,6 +4454,136 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return web.json_response({"run_id": run_id, "status": "stopping"})
 
+    # ------------------------------------------------------------------
+    # Provider management  GET/POST /v1/providers  DELETE /v1/providers/{key}
+    # ------------------------------------------------------------------
+
+    def _providers_config_path(self):
+        """Return the config.yaml path for this profile (honoring HERMES_HOME)."""
+        import os
+        from pathlib import Path as _Path
+        hermes_home = os.environ.get("HERMES_HOME", "")
+        if hermes_home:
+            return _Path(hermes_home) / "config.yaml"
+        return _Path.home() / ".hermes" / "config.yaml"
+
+    def _read_providers(self):
+        """Load providers dict from config.yaml, return {} if absent."""
+        import yaml as _yaml
+        cfg_path = self._providers_config_path()
+        if not cfg_path.exists():
+            return {}
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = _yaml.safe_load(f) or {}
+            return dict(cfg.get("providers") or {})
+        except Exception as exc:
+            logger.warning("[api_server] _read_providers failed: %s", exc)
+            return {}
+
+    def _write_providers(self, providers: dict) -> None:
+        """Atomically overwrite the providers key in config.yaml."""
+        import yaml as _yaml
+        import tempfile
+        import os as _os
+        cfg_path = self._providers_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        # Load current config preserving all other keys
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = _yaml.safe_load(f) or {}
+        else:
+            cfg = {}
+        cfg["providers"] = providers
+        # Atomic write: write to temp then rename
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=cfg_path.parent, suffix=".yaml.tmp")
+        try:
+            with _os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                _yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+            _os.replace(tmp_path, cfg_path)
+        except Exception:
+            try:
+                _os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    async def _handle_list_providers(self, request: "web.Request") -> "web.Response":
+        """GET /v1/providers — list custom providers for this agent/profile."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        providers = self._read_providers()
+        return web.json_response({"providers": providers})
+
+    async def _handle_upsert_provider(self, request: "web.Request") -> "web.Response":
+        """POST /v1/providers — add or update a provider entry.
+
+        Body (JSON):
+          {
+            "key": "ollama-local",       # required — unique provider identifier
+            "base_url": "http://...",    # required
+            "api_key": "",               # optional
+            "api_mode": "openai",        # optional
+            "models": {...},             # optional
+            "discover_models": true,     # optional
+            ...
+          }
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                _openai_error("Invalid JSON body", code="invalid_request"),
+                status=400,
+            )
+        key = (body.pop("key", None) or "").strip()
+        if not key:
+            return web.json_response(
+                _openai_error("'key' is required", code="invalid_request"),
+                status=400,
+            )
+        if not (body.get("base_url") or "").strip():
+            return web.json_response(
+                _openai_error("'base_url' is required", code="invalid_request"),
+                status=400,
+            )
+        providers = self._read_providers()
+        providers[key] = body
+        try:
+            self._write_providers(providers)
+        except Exception as exc:
+            return web.json_response(
+                _openai_error(f"Failed to save provider: {exc}", code="internal_error"),
+                status=500,
+            )
+        return web.json_response({"key": key, "providers": providers})
+
+    async def _handle_delete_provider(self, request: "web.Request") -> "web.Response":
+        """DELETE /v1/providers/{key} — remove a provider entry."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        key = request.match_info["key"]
+        providers = self._read_providers()
+        if key not in providers:
+            return web.json_response(
+                _openai_error(f"Provider '{key}' not found", code="not_found"),
+                status=404,
+            )
+        del providers[key]
+        try:
+            self._write_providers(providers)
+        except Exception as exc:
+            return web.json_response(
+                _openai_error(f"Failed to save config: {exc}", code="internal_error"),
+                status=500,
+            )
+        return web.json_response({"deleted": key, "providers": providers})
+
     async def _sweep_orphaned_runs(self) -> None:
         """Periodically clean up run streams that were never consumed."""
         while True:
@@ -4540,6 +4670,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            # Provider management
+            self._app.router.add_get("/v1/providers", self._handle_list_providers)
+            self._app.router.add_post("/v1/providers", self._handle_upsert_provider)
+            self._app.router.add_delete("/v1/providers/{key}", self._handle_delete_provider)
             # Store the adapter after native routes are registered. Local Hermes-Relay
             # bootstrap shims use this key as a feature-detection hook; registering
             # native routes first lets those shims no-op instead of shadowing the
