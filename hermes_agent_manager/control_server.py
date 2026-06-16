@@ -622,6 +622,9 @@ class ControlServer:
         description = (body.get("description") or "").strip()
         api_port    = body.get("api_server_port") or body.get("port")
         api_key     = (body.get("api_server_key") or body.get("api_key") or "").strip()
+        model       = (body.get("model") or "").strip() or None
+        provider    = (body.get("provider") or "").strip() or None
+        base_url    = (body.get("base_url") or "").strip() or None
 
         # 未指定端口时自动分配，避免端口冲突
         if not api_port:
@@ -665,13 +668,20 @@ class ControlServer:
                 (profile_dir / "SOUL.md").write_text(soul, encoding="utf-8")
 
             # 4. 写入 api_server 端口/key 到 config.yaml
-            # 无论是否传了端口，都确保 api_server.enabled=true 已写入
-            # api_port=0 / None 时跳过端口写入（保留克隆来的值或不设置）
             _patch_profile_api_server(
                 profile_dir,
                 port=int(api_port) if api_port else None,
                 key=api_key or None,
             )
+
+            # 4b. 覆盖 model/provider/base_url（clone 带来的旧值必须被新值替换）
+            if model is not None or provider is not None or base_url is not None:
+                _patch_profile_model(
+                    profile_dir,
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                )
 
             # 5. 创建别名 wrapper script（~/.local/bin/{name} → hermes -p {name}）
             await loop.run_in_executor(
