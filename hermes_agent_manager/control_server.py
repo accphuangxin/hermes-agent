@@ -623,6 +623,11 @@ class ControlServer:
         api_port    = body.get("api_server_port") or body.get("port")
         api_key     = (body.get("api_server_key") or body.get("api_key") or "").strip()
 
+        # 未指定端口时自动分配，避免端口冲突
+        if not api_port:
+            from hermes_agent_manager.manager import _find_free_port
+            api_port = _find_free_port()
+
         if not api_key:
             return _error(
                 "api_server_key 未设置。请在请求中提供 'api_server_key' 字段，"
