@@ -382,8 +382,14 @@ def _patch_profile_model(profile_dir, model=None, provider=None, base_url=None) 
             cfg["model"]["default"] = str(model)
         if provider is not None:
             cfg["model"]["provider"] = str(provider)
+            # 设置了具名 provider，清除独立 base_url（除非同时也传了 base_url）
+            if base_url is None:
+                cfg["model"].pop("base_url", None)
         if base_url is not None:
             cfg["model"]["base_url"] = str(base_url)
+            # 设置了 base_url，清除 provider（除非同时也传了 provider）
+            if provider is None:
+                cfg["model"].pop("provider", None)
         with open(cfg_file, "w", encoding="utf-8") as f:
             ry.dump(cfg, f)
     except Exception as e:
