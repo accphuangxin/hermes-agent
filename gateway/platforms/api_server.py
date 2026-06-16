@@ -4467,35 +4467,33 @@ class APIServerAdapter(BasePlatformAdapter):
             return _Path(hermes_home) / "config.yaml"
         return _Path.home() / ".hermes" / "config.yaml"
 
-    def _read_providers(self):
-        """Load providers dict from config.yaml, return {} if absent."""
+    def _read_providers(self) -> list:
+        """Load custom_providers list from config.yaml, return [] if absent."""
         import yaml as _yaml
         cfg_path = self._providers_config_path()
         if not cfg_path.exists():
-            return {}
+            return []
         try:
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = _yaml.safe_load(f) or {}
-            return dict(cfg.get("providers") or {})
+            return list(cfg.get("custom_providers") or [])
         except Exception as exc:
             logger.warning("[api_server] _read_providers failed: %s", exc)
-            return {}
+            return []
 
-    def _write_providers(self, providers: dict) -> None:
-        """Atomically overwrite the providers key in config.yaml."""
+    def _write_providers(self, providers: list) -> None:
+        """Atomically overwrite the custom_providers key in config.yaml."""
         import yaml as _yaml
         import tempfile
         import os as _os
         cfg_path = self._providers_config_path()
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        # Load current config preserving all other keys
         if cfg_path.exists():
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = _yaml.safe_load(f) or {}
         else:
             cfg = {}
-        cfg["providers"] = providers
-        # Atomic write: write to temp then rename
+        cfg["custom_providers"] = providers
         tmp_fd, tmp_path = tempfile.mkstemp(dir=cfg_path.parent, suffix=".yaml.tmp")
         try:
             with _os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -4509,24 +4507,25 @@ class APIServerAdapter(BasePlatformAdapter):
             raise
 
     async def _handle_list_providers(self, request: "web.Request") -> "web.Response":
-        """GET /v1/providers — list custom providers for this agent/profile."""
+        """GET /v1/providers — list custom_providers for this agent/profile."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
         providers = self._read_providers()
-        return web.json_response({"providers": providers})
+        return web.json_response({"custom_providers": providers})
 
     async def _handle_upsert_provider(self, request: "web.Request") -> "web.Response":
-        """POST /v1/providers — add or update a provider entry.
+        """POST /v1/providers — add or update a custom_providers entry.
 
         Body (JSON):
           {
-            "key": "ollama-local",       # required — unique provider identifier
+            "name": "CloudCI",           # required — unique identifier
             "base_url": "http://...",    # required
-            "api_key": "",               # optional
-            "api_mode": "openai",        # optional
-            "models": {...},             # optional
-            "discover_models": true,     # optional
+            "api_key": "sk-...",         # optional
+            "model": "qwen3_6",          # optional default model
+            "models": {                  # optional per-model config
+              "qwen3_6": {"context_length": 100000, "supports_vision": true}
+            },
             ...
           }
         """
@@ -4540,10 +4539,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 _openai_error("Invalid JSON body", code="invalid_request"),
                 status=400,
             )
-        key = (body.pop("key", None) or "").strip()
-        if not key:
+        name = (body.get("name") or "").strip()
+        if not name:
             return web.json_response(
-                _openai_error("'key' is required", code="invalid_request"),
+                _openai_error("'name' is required", code="invalid_request"),
                 status=400,
             )
         if not (body.get("base_url") or "").strip():
@@ -4552,7 +4551,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
         providers = self._read_providers()
-        providers[key] = body
+        # Replace existing entry with same name, or append
+        updated = False
+        for i, entry in enumerate(providers):
+            if (entry.get("name") or "") == name:
+                providers[i] = body
+                updated = True
+                break
+        if not updated:
+            providers.append(body)
         try:
             self._write_providers(providers)
         except Exception as exc:
@@ -4560,29 +4567,29 @@ class APIServerAdapter(BasePlatformAdapter):
                 _openai_error(f"Failed to save provider: {exc}", code="internal_error"),
                 status=500,
             )
-        return web.json_response({"key": key, "providers": providers})
+        return web.json_response({"name": name, "custom_providers": providers})
 
     async def _handle_delete_provider(self, request: "web.Request") -> "web.Response":
-        """DELETE /v1/providers/{key} — remove a provider entry."""
+        """DELETE /v1/providers/{key} — remove a custom_providers entry by name."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
-        key = request.match_info["key"]
+        name = request.match_info["key"]
         providers = self._read_providers()
-        if key not in providers:
+        new_providers = [e for e in providers if (e.get("name") or "") != name]
+        if len(new_providers) == len(providers):
             return web.json_response(
-                _openai_error(f"Provider '{key}' not found", code="not_found"),
+                _openai_error(f"Provider '{name}' not found", code="not_found"),
                 status=404,
             )
-        del providers[key]
         try:
-            self._write_providers(providers)
+            self._write_providers(new_providers)
         except Exception as exc:
             return web.json_response(
                 _openai_error(f"Failed to save config: {exc}", code="internal_error"),
                 status=500,
             )
-        return web.json_response({"deleted": key, "providers": providers})
+        return web.json_response({"deleted": name, "custom_providers": new_providers})
 
     async def _sweep_orphaned_runs(self) -> None:
         """Periodically clean up run streams that were never consumed."""
