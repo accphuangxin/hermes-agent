@@ -365,8 +365,8 @@ def _patch_profile_description(profile_dir, description: str) -> None:
         logger.warning("Failed to patch profile description: %s", e)
 
 
-def _patch_profile_model(profile_dir, model=None, provider=None) -> None:
-    """将 model/provider 写入 config.yaml 的 model 块。"""
+def _patch_profile_model(profile_dir, model=None, provider=None, base_url=None) -> None:
+    """将 model/provider/base_url 写入 config.yaml 的 model 块。"""
     try:
         from pathlib import Path as _P
         from ruamel.yaml import YAML
@@ -382,6 +382,8 @@ def _patch_profile_model(profile_dir, model=None, provider=None) -> None:
             cfg["model"]["default"] = str(model)
         if provider is not None:
             cfg["model"]["provider"] = str(provider)
+        if base_url is not None:
+            cfg["model"]["base_url"] = str(base_url)
         with open(cfg_file, "w", encoding="utf-8") as f:
             ry.dump(cfg, f)
     except Exception as e:
@@ -754,12 +756,13 @@ class ControlServer:
                     key=str(api_key) if api_key is not None else None,
                 )
 
-            # model / provider
-            if "model" in body or "provider" in body:
+            # model / provider / base_url
+            if "model" in body or "provider" in body or "base_url" in body:
                 _patch_profile_model(
                     profile_dir,
                     model=body.get("model"),
                     provider=body.get("provider"),
+                    base_url=body.get("base_url"),
                 )
 
         except Exception as exc:
