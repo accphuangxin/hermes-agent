@@ -1019,10 +1019,19 @@ class ControlServer:
             await loop.run_in_executor(None, lambda: _restart_profile_gateway(name))
         except Exception as exc:
             return _error(str(exc), status=500)
-        # Brief wait so the old process exits and health probe reflects new state
-        await asyncio.sleep(3)
+
+        # Poll until gateway is alive (max 15s). _restart_profile_gateway already
+        # waits up to 5s internally; here we cover the spawn-then-boot path which
+        # can take 8-12s before /health responds.
         info = _read_profile_full_config(profile_dir)
-        gw_running = _profile_gateway_running(profile_dir, port=info.get("port", 0))
+        port = info.get("port", 0)
+        deadline = loop.time() + 15
+        while loop.time() < deadline:
+            await asyncio.sleep(0.5)
+            if await loop.run_in_executor(None, lambda: _gateway_alive(port)):
+                break
+
+        gw_running = _profile_gateway_running(profile_dir, port=port)
         return _json_response(_profile_to_dict(name, profile_dir, info, gw_running))
 
     async def _handle_restart_all(self, request: "web.Request") -> "web.Response":
