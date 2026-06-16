@@ -881,65 +881,24 @@ class ControlServer:
 
             # 直接删除目录，绕过 delete_profile 的 HERMES_HOME 路径解析问题
             def _do_delete():
-                import subprocess, signal, time
+                import subprocess
                 from pathlib import Path as _P
 
                 profile_str = str(profile_dir)
 
-                # 1. 停止 gateway 进程（先通过 gateway.pid，再通过进程命令行扫描）
-                #    涵盖两种启动方式：launchd 管理 和 _spawn_gateway 直接 spawn
-                killed_pids = set()
-
-                # 1a. 读 gateway.pid 文件
-                pid_file = profile_dir / "gateway.pid"
-                if pid_file.exists():
-                    try:
-                        pid = int(pid_file.read_text().strip())
-                        os.kill(pid, signal.SIGTERM)
-                        killed_pids.add(pid)
-                        logger.info("Sent SIGTERM to gateway pid %d for profile %r", pid, name)
-                    except Exception as e:
-                        logger.warning("Failed to kill gateway pid from pid file: %s", e)
-
-                # 1b. 扫描进程命令行，找到 HERMES_HOME 含该 profile 路径的进程
+                # 1. 通过 hermes gateway stop 优雅停止（写 planned_stop_marker + SIGTERM）
+                #    stop_profile_gateway() 读 gateway.pid，适用于 launchd 和直接 spawn 两种方式
+                hermes_bin, stop_env = _profile_env(name)
                 try:
-                    import psutil
-                    for proc in psutil.process_iter(["pid", "environ", "cmdline"]):
-                        try:
-                            env = proc.environ()
-                            if env.get("HERMES_HOME", "") == profile_str:
-                                if proc.pid not in killed_pids:
-                                    proc.terminate()
-                                    killed_pids.add(proc.pid)
-                                    logger.info("Terminated gateway process pid=%d for profile %r", proc.pid, name)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                except ImportError:
-                    # psutil 不可用时，通过 cmdline 扫描
-                    try:
-                        result = subprocess.run(
-                            ["pgrep", "-f", profile_str],
-                            capture_output=True, text=True,
-                        )
-                        for pid_str in result.stdout.strip().splitlines():
-                            try:
-                                pid = int(pid_str.strip())
-                                if pid not in killed_pids:
-                                    os.kill(pid, signal.SIGTERM)
-                                    killed_pids.add(pid)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                # 等进程退出（最多 3s）
-                if killed_pids:
-                    time.sleep(1)
-                    for pid in killed_pids:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass  # 已退出
+                    subprocess.run(
+                        [hermes_bin, "gateway", "stop"],
+                        env=stop_env,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                    logger.info("Gateway stopped for profile %r", name)
+                except Exception as e:
+                    logger.warning("gateway stop failed for %r: %s", name, e)
 
                 # 2. 卸载 launchd plist（如果存在）
                 launch_agents = _P.home() / "Library" / "LaunchAgents"
