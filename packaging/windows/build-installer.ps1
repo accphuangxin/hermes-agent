@@ -246,16 +246,41 @@ begin
 end;
 
 // Rewrite .cmd launcher {app} placeholders with real install path.
+// We know the exact template so we reconstruct the content directly
+// instead of load-modify-save (which has AnsiString/String friction).
 procedure FixOneLauncher(appDir, cmdName: String);
 var
-  oldContent, newContent: AnsiString;
+  module, func, newContent: String;
+  entryPoints: array[0..6] of String;
+  modules:     array[0..6] of String;
+  funcs:       array[0..6] of String;
+  i: Integer;
+  content: AnsiString;
 begin
-  if FileExists(appDir + '\bin\' + cmdName + '.cmd') then begin
-    LoadStringFromFile(appDir + '\bin\' + cmdName + '.cmd', oldContent);
-    newContent := oldContent;
-    StringChangeEx(newContent, '{app}', appDir, True);
-    SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', newContent, False);
+  entryPoints[0] := 'hermes';              modules[0] := 'hermes_cli.main';              funcs[0] := 'main';
+  entryPoints[1] := 'hermes-agent';        modules[1] := 'run_agent';                    funcs[1] := 'main';
+  entryPoints[2] := 'hermes-acp';          modules[2] := 'acp_adapter.entry';            funcs[2] := 'main';
+  entryPoints[3] := 'hermes-agent-manager'; modules[3] := 'hermes_agent_manager.__main__'; funcs[3] := 'main';
+  entryPoints[4] := 'ham';                 modules[4] := 'hermes_agent_manager.__main__'; funcs[4] := 'main';
+  entryPoints[5] := 'hks';                 modules[5] := 'hermes_kanban_server.__main__'; funcs[5] := 'main';
+  entryPoints[6] := 'hermes-kanban-server'; modules[6] := 'hermes_kanban_server.__main__'; funcs[6] := 'main';
+
+  module := '';
+  func   := '';
+  for i := 0 to 6 do begin
+    if entryPoints[i] = cmdName then begin
+      module := modules[i];
+      func   := funcs[i];
+      break;
+    end;
   end;
+  if module = '' then exit;
+
+  newContent := '@echo off' + #13#10 +
+    '"' + appDir + '\venv\Scripts\python.exe" -c ' +
+    '"import sys; from ' + module + ' import ' + func + '; sys.exit(' + func + '())" %*' + #13#10;
+  content := newContent;
+  SaveStringToFile(appDir + '\bin\' + cmdName + '.cmd', content, False);
 end;
 
 procedure FixLaunchers();
