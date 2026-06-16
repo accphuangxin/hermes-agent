@@ -328,14 +328,10 @@ def _install_and_start_gateway(profile_name: str) -> None:
     else:
         logger.info("Gateway plist already exists for profile %r, skipping install", profile_name)
 
-    # start 触发启动（后台，不阻塞），不管 install 是否执行
-    subprocess.Popen(
-        [hermes_bin, "gateway", "start"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    # 直接 spawn gateway 进程（不依赖 launchd start）
+    # launchd start 在 plist 已注册但未运行时有效，但 install 出错时 start 也会失败。
+    # 用 _spawn_gateway 保证始终用当前 venv 的代码启动，且不受 launchd 状态影响。
+    _spawn_gateway(profile_name, hermes_bin, env)
     logger.info("Gateway start triggered for profile %r (background)", profile_name)
 
 
