@@ -660,7 +660,15 @@ class ControlServer:
                         logger.warning("create profile: skills symlink warning (non-fatal): %s", _err)
                         # profile 目录已创建，返回正确路径
                         _rh = _real_hermes_home()
-                        return _rh if name == "default" else _rh / "profiles" / name
+                        _pdir = _rh if name == "default" else _rh / "profiles" / name
+                        # write_profile_meta 在 symlink 异常之后未执行，手动补写
+                        if description:
+                            try:
+                                from hermes_cli.profiles import write_profile_meta
+                                write_profile_meta(_pdir, description=description.strip(), description_auto=False)
+                            except Exception:
+                                pass
+                        return _pdir
                     raise
 
             profile_dir = await loop.run_in_executor(None, _create_profile_safe)
