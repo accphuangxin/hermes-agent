@@ -180,7 +180,8 @@ const
 // Also rewrites the .cmd launchers' {app} placeholder.
 procedure RelocateVenv();
 var
-  appDir, pyExe, relocScript, tmpScript: String;
+  appDir, pyExe, tmpScript: String;
+  relocScript: AnsiString;
   ResultCode: Integer;
 begin
   appDir := ExpandConstant('{app}');
@@ -247,7 +248,7 @@ end;
 // Rewrite .cmd launcher {app} placeholders with real install path.
 procedure FixOneLauncher(appDir, cmdName: String);
 var
-  oldContent, newContent: String;
+  oldContent, newContent: AnsiString;
 begin
   if FileExists(appDir + '\bin\' + cmdName + '.cmd') then begin
     LoadStringFromFile(appDir + '\bin\' + cmdName + '.cmd', oldContent);
