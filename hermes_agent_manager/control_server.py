@@ -212,17 +212,44 @@ def _start_profile_gateway(profile_name: str) -> None:
 
 
 def _restart_profile_gateway(profile_name: str) -> None:
-    """重启指定 profile 的 gateway 服务（后台执行，不阻塞）。"""
-    import subprocess
+    """重启指定 profile 的 gateway 服务（后台执行，不阻塞）。
+
+    优先通过 `hermes gateway restart` 重启（走 launchd/systemd）。
+    若 launchd 服务不可用（开发模式 unload 后），直接 spawn 新进程代替。
+    """
+    import subprocess, sys, time
+    from pathlib import Path as _P
+
     hermes_bin, env = _profile_env(profile_name)
-    subprocess.Popen(
+
+    # 先尝试 gateway restart（走 launchd/systemd）
+    result = subprocess.run(
         [hermes_bin, "gateway", "restart"],
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        capture_output=True,
+        timeout=10,
     )
-    logger.info("Gateway restart triggered for profile %r (background)", profile_name)
+    if result.returncode == 0:
+        logger.info("Gateway restart triggered for profile %r (launchd/systemd)", profile_name)
+        return
+
+    # launchd restart 失败（服务未安装或已 unload）——直接 spawn 新进程
+    logger.info(
+        "Gateway launchd restart failed for %r (rc=%d), spawning directly",
+        profile_name, result.returncode,
+    )
+    log_dir = _P(env["HERMES_HOME"]) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "gateway.log"
+    with open(log_path, "a") as log_f:
+        subprocess.Popen(
+            [hermes_bin, "gateway", "run", "--replace"],
+            env=env,
+            stdout=log_f,
+            stderr=log_f,
+            start_new_session=True,
+        )
+    logger.info("Gateway spawned directly for profile %r", profile_name)
 
 
 def _install_and_start_gateway(profile_name: str) -> None:
