@@ -647,16 +647,27 @@ class ControlServer:
             os.environ["HERMES_HOME"] = real_home
 
             # 1. 创建 profile 目录（在线程池里跑，避免阻塞事件循环）
+            # skills symlink 错误是非致命的，捕获后继续执行后续 patch 步骤
             from hermes_cli.profiles import create_profile, create_wrapper_script
-            profile_dir = await loop.run_in_executor(
-                None,
-                lambda: create_profile(
-                    name=name,
-                    clone_from=clone_from,
-                    clone_config=clone,
-                    description=description or None,
-                ),
-            )
+
+            def _create_profile_safe():
+                try:
+                    return create_profile(
+                        name=name,
+                        clone_from=clone_from,
+                        clone_config=clone,
+                        description=description or None,
+                    )
+                except Exception as _e:
+                    _err = str(_e)
+                    if "symlink" in _err.lower() or ("No such file or directory" in _err and "skills" in _err):
+                        logger.warning("create profile: skills symlink warning (non-fatal): %s", _err)
+                        # profile 目录已创建，返回正确路径
+                        _rh = _real_hermes_home()
+                        return _rh if name == "default" else _rh / "profiles" / name
+                    raise
+
+            profile_dir = await loop.run_in_executor(None, _create_profile_safe)
 
             # 2. 删除克隆带来的 .env（不应继承父 profile 的密钥）
             env_file = profile_dir / ".env"
@@ -722,16 +733,8 @@ class ControlServer:
         except (ValueError, FileNotFoundError) as exc:
             return _error(str(exc))
         except Exception as exc:
-            err_str = str(exc)
-            # skills symlink 错误是非致命的（source profile 里有坏符号链接）
-            # profile 和 gateway 已经创建成功，只是部分 skill 未能复制
-            if "symlink" in err_str.lower() or ("No such file or directory" in err_str and "skills" in err_str):
-                logger.warning("create profile: skills symlink warning (non-fatal): %s", err_str)
-                # 继续返回成功（profile_dir 在 try 块内已赋值）
-                profile_dir = _real_hermes_home() / "profiles" / name
-            else:
-                logger.exception("create profile failed")
-                return _error(err_str, status=500)
+            logger.exception("create profile failed")
+            return _error(str(exc), status=500)
 
         # 返回新 profile 的完整信息
         info = _read_profile_full_config(profile_dir)
