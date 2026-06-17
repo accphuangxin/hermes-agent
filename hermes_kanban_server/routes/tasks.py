@@ -4,6 +4,18 @@ import json
 from aiohttp import web
 
 
+def _safe_json(value):
+    """尝试把字符串解析为 JSON，失败则原样返回。"""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 async def create_task(request: web.Request) -> web.Response:
     """
     Create a new task on a board.
@@ -1047,11 +1059,19 @@ async def get_task_runs(request: web.Request) -> web.Response:
     GET /v1/boards/{board}/tasks/{task_id}/runs
 
     返回任务的每次运行记录（开始时间、结束时间、结果摘要、错误信息等）。
+
+    Query params:
+        include_steps: true — 同时返回每次 run 的工具调用步骤流水（类似 Claude Code 展示方式）
+        latest: true — 只返回最新一次 run
     """
     board_slug = request.match_info["board"]
     task_id = request.match_info["task_id"]
+    include_steps = request.rel_url.query.get("include_steps", "").lower() == "true"
+    latest_only = request.rel_url.query.get("latest", "").lower() == "true"
 
     try:
+        import sqlite3 as _sqlite3
+        from pathlib import Path
         from hermes_cli import kanban_db
 
         conn = kanban_db.connect(board=board_slug)
@@ -1060,15 +1080,39 @@ async def get_task_runs(request: web.Request) -> web.Response:
             if not task:
                 return web.json_response({"error": f"Task '{task_id}' not found"}, status=404)
 
-            rows = conn.execute(
+            query = (
                 "SELECT id, profile, step_key, status, claim_lock, worker_pid, "
                 "started_at, ended_at, outcome, summary, error, metadata "
-                "FROM task_runs WHERE task_id = ? ORDER BY started_at ASC",
-                (task_id,),
-            ).fetchall()
+                "FROM task_runs WHERE task_id = ? ORDER BY started_at ASC"
+            )
+            rows = conn.execute(query, (task_id,)).fetchall()
 
-            runs = []
-            for row in rows:
+        finally:
+            conn.close()
+
+        if latest_only and rows:
+            rows = [rows[-1]]
+
+        # 如果需要工具调用步骤，按 profile 查找对应的 state.db
+        # gateway 每个 profile 有独立的 state.db：~/.hermes/profiles/{profile}/state.db
+        # 全局 gateway 用 ~/.hermes/state.db
+        def _get_state_conn(profile: str):
+            hermes_home = Path.home() / ".hermes"
+            candidates = [
+                hermes_home / "profiles" / profile / "state.db",
+                hermes_home / "state.db",
+            ]
+            for p in candidates:
+                if p.exists():
+                    c = _sqlite3.connect(str(p))
+                    c.row_factory = _sqlite3.Row
+                    return c
+            return None
+
+        state_conn = None  # 占位，按 run 的 profile 动态打开
+
+        runs = []
+        for row in rows:
                 metadata = None
                 if row["metadata"]:
                     try:
@@ -1080,7 +1124,7 @@ async def get_task_runs(request: web.Request) -> web.Response:
                 if row["started_at"] and row["ended_at"]:
                     duration = row["ended_at"] - row["started_at"]
 
-                runs.append({
+                run_entry = {
                     "id": row["id"],
                     "profile": row["profile"],
                     "step_key": row["step_key"],
@@ -1094,18 +1138,85 @@ async def get_task_runs(request: web.Request) -> web.Response:
                     "summary": row["summary"],
                     "error": row["error"],
                     "metadata": metadata,
-                })
+                }
 
-            return web.json_response({
-                "task_id": task_id,
-                "task_title": task.title,
-                "task_status": task.status,
-                "run_count": len(runs),
-                "runs": runs,
-            })
+                # 从对应 profile 的 state.db 加载工具调用步骤
+                if include_steps and metadata:
+                    run_profile = row["profile"] or ""
+                    state_conn = _get_state_conn(run_profile)
+                    session_id = metadata.get("worker_session_id", "")
+                    if session_id and state_conn:
+                        msg_rows = state_conn.execute(
+                            """
+                            SELECT role, tool_name, tool_call_id, content, tool_calls, timestamp
+                            FROM messages
+                            WHERE session_id = ?
+                            ORDER BY timestamp ASC
+                            """,
+                            (session_id,),
+                        ).fetchall()
 
-        finally:
-            conn.close()
+                        steps = []
+                        for msg in msg_rows:
+                            tool_calls = None
+                            if msg["tool_calls"]:
+                                try:
+                                    tool_calls = json.loads(msg["tool_calls"])
+                                except Exception:
+                                    pass
+
+                            step = {
+                                "role": msg["role"],
+                                "timestamp": msg["timestamp"],
+                            }
+
+                            if msg["role"] == "assistant":
+                                # assistant 消息：提取文字内容和工具调用列表
+                                step["content"] = msg["content"] or ""
+                                if tool_calls:
+                                    step["tool_calls"] = [
+                                        {
+                                            "id": tc.get("id"),
+                                            "name": tc.get("function", {}).get("name"),
+                                            "input": _safe_json(tc.get("function", {}).get("arguments")),
+                                        }
+                                        for tc in tool_calls
+                                        if isinstance(tc, dict)
+                                    ]
+                            elif msg["role"] == "tool":
+                                # 工具返回结果
+                                step["tool_name"] = msg["tool_name"]
+                                step["tool_call_id"] = msg["tool_call_id"]
+                                raw = msg["content"] or ""
+                                # 尝试解析 JSON 结果，截断过长内容
+                                try:
+                                    parsed = json.loads(raw)
+                                    step["result"] = parsed
+                                except Exception:
+                                    step["result"] = raw[:500] if len(raw) > 500 else raw
+                            elif msg["role"] == "user":
+                                step["content"] = (msg["content"] or "")[:200]
+
+                            steps.append(step)
+
+                        run_entry["session_id"] = session_id
+                        run_entry["steps"] = steps
+                        run_entry["step_count"] = len(steps)
+                        run_entry["tool_count"] = sum(1 for s in steps if s["role"] == "tool")
+
+                    if state_conn:
+                        state_conn.close()
+                        state_conn = None
+
+                runs.append(run_entry)
+
+        return web.json_response({
+            "task_id": task_id,
+            "task_title": task.title,
+            "task_status": task.status,
+            "run_count": len(runs),
+            "runs": runs,
+        })
 
     except FileNotFoundError:
         return web.json_response({"error": f"Board '{board_slug}' not found"}, status=404)
