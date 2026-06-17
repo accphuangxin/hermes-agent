@@ -3791,11 +3791,13 @@ class APIServerAdapter(BasePlatformAdapter):
         # attachments: list of local file paths or http(s) URLs sent by the client.
         # Processed after user_message is resolved; routing (native vs text) is
         # decided per-turn based on the active model's vision capability.
-        raw_attachments: List[str] = body.get("attachments") or []
-        if isinstance(raw_attachments, str):
-            raw_attachments = [raw_attachments]
+        raw_attachments: List[str] = [
+            a for a in (body.get("attachments") or [])
+            if isinstance(a, str) and a.strip()
+        ]
 
-        if not raw_input and not raw_messages:
+        # Allow empty input when attachments are present (image-only message)
+        if not raw_input and not raw_messages and not raw_attachments:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
 
         # ── Step 1: resolve plain user_message text and implicit history ──────
@@ -3842,7 +3844,8 @@ class APIServerAdapter(BasePlatformAdapter):
             else:
                 user_message = raw_input or ""
 
-        if not _content_has_visible_payload(user_message):
+        # Allow empty text when attachments are present (image-only message)
+        if not _content_has_visible_payload(user_message) and not raw_attachments:
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         # ── Step 2: image routing ─────────────────────────────────────────────
