@@ -133,7 +133,7 @@ foreach ($name in $EntryPoints.Keys) {
     $func   = $EntryPoints[$name] -replace ".*:", ""
     # Use {app} placeholder — Inno Setup's FixLaunchers() replaces it with real install path.
     # venv\Scripts\python.exe auto-activates the venv so site-packages are on sys.path.
-    $cmdContent = "@echo off`r`n`"{app}\venv\Scripts\python.exe`" -c `"import sys; from $module import $func; sys.exit($func())`" %*`r`n"
+    $cmdContent = "@echo off`r`nchcp 65001 > nul`r`nset PYTHONUTF8=1`r`n`"{app}\venv\Scripts\python.exe`" -c `"import sys; from $module import $func; sys.exit($func())`" %*`r`n"
     Set-Content -Path "$BinDir\$name.cmd" -Value $cmdContent -NoNewline
 }
 Write-Host "==> Launchers written to $BinDir"
@@ -156,6 +156,7 @@ SolidCompression=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+ChangesEnvironment=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -277,6 +278,8 @@ begin
   if module = '' then exit;
 
   newContent := '@echo off' + #13#10 +
+    'chcp 65001 > nul' + #13#10 +
+    'set PYTHONUTF8=1' + #13#10 +
     '"' + appDir + '\venv\Scripts\python.exe" -c ' +
     '"import sys; from ' + module + ' import ' + func + '; sys.exit(' + func + '())" %*' + #13#10;
   content := newContent;
