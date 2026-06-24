@@ -149,10 +149,11 @@ def configure_windows_stdio() -> bool:
     # degraded output over a stack trace.
     _reconfigure_stream(sys.stdout)
     _reconfigure_stream(sys.stderr)
-    # stdin is re-configured for completeness; Hermes's interactive
-    # input path uses prompt_toolkit which manages its own encoding,
-    # but batch/pipe input benefits from UTF-8 decoding on stdin too.
-    _reconfigure_stream(sys.stdin)
+    # Do NOT reconfigure sys.stdin on Windows: prompt_toolkit manages stdin
+    # directly via the Win32 console API (ReadConsoleInputW), bypassing
+    # Python's TextIOWrapper.  Calling reconfigure() here corrupts the
+    # internal buffer state before prompt_toolkit takes over, causing the
+    # terminal to appear frozen with no response to keyboard input.
 
     _CONFIGURED = True
     return True
