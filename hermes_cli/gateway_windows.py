@@ -108,17 +108,24 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
     if schtasks is None:
         return (1, "", "schtasks.exe not found on PATH")
     try:
+        # schtasks output uses the system OEM code page (e.g. GBK on Chinese
+        # Windows), not UTF-8.  Read as bytes and decode with errors="replace"
+        # so PYTHONUTF8=1 (which we set in .cmd launchers) doesn't cause
+        # UnicodeDecodeError in subprocess._readerthread.
+        import locale
+        oem_encoding = locale.getpreferredencoding(False) or "mbcs"
         proc = subprocess.run(
             [schtasks, *args],
             capture_output=True,
-            text=True,
             timeout=_SCHTASKS_TIMEOUT_S,
             # CREATE_NO_WINDOW avoids a flashing console window when the CLI
             # is itself hosted in a TUI. See tools/browser_tool.py for the
             # same pattern and the windows-subprocess-sigint-storm.md ref.
             creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
-        return (proc.returncode, proc.stdout or "", proc.stderr or "")
+        stdout = proc.stdout.decode(oem_encoding, errors="replace") if proc.stdout else ""
+        stderr = proc.stderr.decode(oem_encoding, errors="replace") if proc.stderr else ""
+        return (proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         return (124, "", f"schtasks timed out after {_SCHTASKS_TIMEOUT_S}s")
     except OSError as e:
