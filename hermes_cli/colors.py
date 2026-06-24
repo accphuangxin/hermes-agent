@@ -4,6 +4,35 @@ import os
 import sys
 
 
+def _enable_windows_ansi() -> bool:
+    """Enable Virtual Terminal Processing on Windows cmd.exe / PowerShell.
+
+    Returns True if ANSI sequences will be processed, False if the console
+    does not support them (e.g. old Windows, redirected output).
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        # Get handle for stdout (STD_OUTPUT_HANDLE = -11)
+        handle = kernel32.GetStdHandle(-11)
+        if handle == -1:
+            return False
+
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        mode = ctypes.wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        if mode.value & ENABLE_VIRTUAL_TERMINAL_PROCESSING:
+            return True
+        return bool(kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+    except Exception:
+        return False
+
+
 def should_use_color() -> bool:
     """Return True when colored output is appropriate.
 
@@ -16,7 +45,7 @@ def should_use_color() -> bool:
         return False
     if not sys.stdout.isatty():
         return False
-    return True
+    return _enable_windows_ansi()
 
 
 class Colors:
