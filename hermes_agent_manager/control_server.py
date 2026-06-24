@@ -148,42 +148,38 @@ def _list_hermes_profile_agents() -> list:
     return result
 
 
-def _profile_env(profile_name: str) -> tuple[str, dict]:
-    """Return (hermes_bin, env) for running hermes commands against a profile.
+def _profile_env(profile_name: str) -> tuple[list[str], dict]:
+    """Return (hermes_cmd, env) for running hermes commands against a profile.
 
     IMPORTANT: must NOT use /usr/local/bin/hermes — that launcher bash script
     hard-codes ``HERMES_HOME="/usr/local/hermes"``, overwriting the env var we
     set here before the Python process even starts.  Use the venv's hermes
     entry-point directly so HERMES_HOME propagates correctly.
+
+    Returns a list (not a string) so callers can do cmd + ["gateway", "stop"]
+    and it works cross-platform (Windows has no bare "hermes" executable).
     """
-    import os, subprocess, sys
+    import os, sys
     from pathlib import Path as _P
     real_home = _real_hermes_home()
     profile_home = str(real_home) if profile_name == "default" else str(real_home / "profiles" / profile_name)
 
-    # Prefer the venv hermes (Python shim, honours HERMES_HOME) over the
-    # pkg-installed shell wrapper which hard-codes HERMES_HOME=/usr/local/hermes.
-    venv_bin = _P(sys.executable).parent  # e.g. /usr/local/hermes/venv/bin
-    venv_hermes = venv_bin / "hermes"
-    if venv_hermes.exists():
-        hermes_bin = str(venv_hermes)
-    else:
-        # Fallback: shell wrapper — caller must be aware HERMES_HOME may be clobbered
-        hermes_bin = subprocess.run(
-            ["which", "hermes"], capture_output=True, text=True
-        ).stdout.strip() or "hermes"
+    # On all platforms use sys.executable -m hermes_cli.main so we never depend
+    # on a platform-specific wrapper name (hermes vs hermes.exe vs hermes.cmd).
+    # sys.executable is the venv python, so site-packages are always correct.
+    hermes_cmd = [sys.executable, "-m", "hermes_cli.main"]
 
     env = os.environ.copy()
     env["HERMES_HOME"] = profile_home
-    return hermes_bin, env
+    return hermes_cmd, env
 
 
 def _stop_profile_gateway(profile_name: str) -> None:
     """停止指定 profile 的 gateway 服务（同步等待，最多 30s）。"""
     import subprocess
-    hermes_bin, env = _profile_env(profile_name)
+    hermes_cmd, env = _profile_env(profile_name)
     result = subprocess.run(
-        [hermes_bin, "gateway", "stop"],
+        hermes_cmd + ["gateway", "stop"],
         env=env,
         capture_output=True, text=True, timeout=30,
     )
@@ -200,9 +196,9 @@ def _stop_profile_gateway(profile_name: str) -> None:
 def _start_profile_gateway(profile_name: str) -> None:
     """启动指定 profile 的 gateway 服务（后台执行，不阻塞）。"""
     import subprocess
-    hermes_bin, env = _profile_env(profile_name)
+    hermes_cmd, env = _profile_env(profile_name)
     subprocess.Popen(
-        [hermes_bin, "gateway", "start"],
+        hermes_cmd + ["gateway", "start"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -247,7 +243,7 @@ def _gateway_alive(port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def _spawn_gateway(profile_name: str, hermes_bin: str, env: dict) -> None:
+def _spawn_gateway(profile_name: str, hermes_cmd: list, env: dict) -> None:
     """直接 spawn gateway 进程（不走 launchd）。"""
     import subprocess
     from pathlib import Path as _P
@@ -256,7 +252,7 @@ def _spawn_gateway(profile_name: str, hermes_bin: str, env: dict) -> None:
     log_path = log_dir / "gateway.log"
     with open(log_path, "a") as log_f:
         subprocess.Popen(
-            [hermes_bin, "gateway", "run", "--replace"],
+            hermes_cmd + ["gateway", "run", "--replace"],
             env=env,
             stdout=log_f,
             stderr=log_f,
@@ -272,8 +268,8 @@ def _restart_profile_gateway(profile_name: str) -> None:
     gateway，确保新进程使用最新代码。不走 launchd/systemd restart，因为 plist
     里写死的是安装包路径（/usr/local/hermes/venv），重启后会加载旧代码。
     """
-    hermes_bin, env = _profile_env(profile_name)
-    _spawn_gateway(profile_name, hermes_bin, env)
+    hermes_cmd, env = _profile_env(profile_name)
+    _spawn_gateway(profile_name, hermes_cmd, env)
 
 
 def _install_and_start_gateway(profile_name: str) -> None:
@@ -290,7 +286,7 @@ def _install_and_start_gateway(profile_name: str) -> None:
     # HERMES_HOME=/usr/local/hermes，导致 gateway install 作用于 default
     # profile 而非目标 profile，触发 bootout/bootstrap 循环给 default
     # gateway 发 SIGTERM。
-    hermes_bin, env = _profile_env(profile_name)
+    hermes_cmd, env = _profile_env(profile_name)
     profile_home = env["HERMES_HOME"]
 
     # Check if the launchd plist for this profile already exists and is current.
@@ -314,7 +310,7 @@ def _install_and_start_gateway(profile_name: str) -> None:
 
     if needs_install:
         result = subprocess.run(
-            [hermes_bin, "gateway", "install"],
+            hermes_cmd + ["gateway", "install"],
             env=env, capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
@@ -331,7 +327,7 @@ def _install_and_start_gateway(profile_name: str) -> None:
     # 直接 spawn gateway 进程（不依赖 launchd start）
     # launchd start 在 plist 已注册但未运行时有效，但 install 出错时 start 也会失败。
     # 用 _spawn_gateway 保证始终用当前 venv 的代码启动，且不受 launchd 状态影响。
-    _spawn_gateway(profile_name, hermes_bin, env)
+    _spawn_gateway(profile_name, hermes_cmd, env)
     logger.info("Gateway start triggered for profile %r (background)", profile_name)
 
 
@@ -888,10 +884,10 @@ class ControlServer:
 
                 # 1. 通过 hermes gateway stop 优雅停止（写 planned_stop_marker + SIGTERM）
                 #    stop_profile_gateway() 读 gateway.pid，适用于 launchd 和直接 spawn 两种方式
-                hermes_bin, stop_env = _profile_env(name)
+                hermes_cmd, stop_env = _profile_env(name)
                 try:
                     subprocess.run(
-                        [hermes_bin, "gateway", "stop"],
+                        hermes_cmd + ["gateway", "stop"],
                         env=stop_env,
                         capture_output=True,
                         timeout=15,
