@@ -130,11 +130,18 @@ def get_default_hermes_root() -> Path:
         pass
 
     # Docker / custom deployment.
-    # Check if this is a profile path: <root>/profiles/<name>
-    # If the immediate parent dir is named "profiles", the root is
-    # the grandparent — this covers Docker profiles correctly.
-    if env_path.parent.name == "profiles":
-        return env_path.parent.parent
+    # Walk the resolved path looking for a ".../profiles/<name>" segment.
+    # This covers both the simple case (direct parent named "profiles") and
+    # deeper nesting (e.g. /opt/data/hermes/profiles/trader where "opt" is
+    # not named "profiles").  The root is the directory that contains the
+    # "profiles" segment.
+    resolved = env_path.resolve()
+    parts = resolved.parts
+    for i, part in enumerate(parts):
+        if part == "profiles" and i + 1 < len(parts):
+            # parts[:i] is the root (everything before "profiles/")
+            root = Path(*parts[:i]) if i > 0 else Path(parts[0])
+            return root
 
     # Not a profile path — HERMES_HOME itself is the root
     return env_path

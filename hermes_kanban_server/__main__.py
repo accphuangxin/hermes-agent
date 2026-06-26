@@ -56,8 +56,13 @@ def _is_linux() -> bool:
 
 def _hermes_home() -> Path:
     try:
-        from hermes_constants import get_hermes_home
-        candidate = get_hermes_home()
+        # Must use get_default_hermes_root(), NOT get_hermes_home().
+        # get_hermes_home() returns the active *profile* directory (e.g.
+        # ~/.hermes/profiles/trader), which would anchor kanban.db inside
+        # that profile and cause it to "disappear" when a different profile
+        # is active. kanban is intentionally shared across profiles.
+        from hermes_constants import get_default_hermes_root
+        candidate = get_default_hermes_root()
         if not os.access(str(candidate), os.W_OK):
             candidate = Path.home() / ".hermes"
         candidate.mkdir(parents=True, exist_ok=True)
