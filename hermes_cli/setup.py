@@ -150,7 +150,7 @@ from hermes_cli.colors import Colors, color
 def print_header(title: str):
     """Print a section header."""
     print()
-    print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
+    print(color(f">> {title}", Colors.CYAN, Colors.BOLD))
 
 
 from hermes_cli.cli_output import (  # noqa: E402
@@ -246,7 +246,7 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
 
     print(color(question, Colors.YELLOW))
     for i, choice in enumerate(choices):
-        marker = "●" if i == default else "○"
+        marker = "(*)" if i == default else "( )"
         if i == default:
             print(color(f"  {marker} {choice}", Colors.GREEN))
         else:
@@ -705,7 +705,6 @@ def setup_model_provider(config: dict, *, quick: bool = False):
 
     print_header("Inference Provider")
     print_info("Choose how to connect to your main chat model.")
-    print_info(f"   Guide: {_DOCS_BASE}/integrations/providers")
     print()
 
     # Delegate to the shared hermes model flow — handles provider picker,
