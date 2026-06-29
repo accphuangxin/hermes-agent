@@ -3331,6 +3331,12 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
 
     _atexit.register(_atexit_hook)
 
+    # aiohttp requires SelectorEventLoop on Windows — the default
+    # ProactorEventLoop (Python 3.8+) doesn't support the select() call
+    # aiohttp uses, causing every HTTP server bind to fail immediately.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     success = False
     try:
         success = asyncio.run(start_gateway(replace=replace, verbosity=verbosity))
